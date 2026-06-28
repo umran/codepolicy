@@ -1,0 +1,15 @@
+[package]
+name = "codepolicy-frontends"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Language frontends that emit canonical events for codepolicy"
+
+[dependencies]
+codepolicy-events.workspace = true
+anyhow.workspace = true
+camino.workspace = true
+serde_json.workspace = true
+tree-sitter.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-javascript.workspace = true

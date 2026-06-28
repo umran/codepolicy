@@ -1,0 +1,18 @@
+[package]
+name = "codepolicy-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Orchestration: discovery, extraction and the check pipeline for codepolicy"
+
+[dependencies]
+codepolicy-events.workspace = true
+codepolicy-frontends.workspace = true
+codepolicy-rules.workspace = true
+codepolicy-match.workspace = true
+anyhow.workspace = true
+camino.workspace = true
+ignore.workspace = true
+rayon.workspace = true
+serde_yaml_ng.workspace = true
+serde_json.workspace = true

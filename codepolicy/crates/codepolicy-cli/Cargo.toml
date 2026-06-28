@@ -1,0 +1,25 @@
+[package]
+name = "codepolicy-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "codepolicy command-line interface"
+
+[[bin]]
+name = "codepolicy"
+path = "src/main.rs"
+
+[dependencies]
+codepolicy-events.workspace = true
+codepolicy-frontends.workspace = true
+codepolicy-rules.workspace = true
+codepolicy-match.workspace = true
+codepolicy-report.workspace = true
+codepolicy-core.workspace = true
+anyhow.workspace = true
+camino.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

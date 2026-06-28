@@ -1,0 +1,15 @@
+rules:
+  - id: TXN_WITHOUT_COMMIT_OR_ROLLBACK
+    severity: warning
+    description: A begun transaction must visibly commit or roll back in the same scope.
+    applies_to: { languages: [typescript, javascript] }
+    match_sequence:
+      anchor: { within: ScopeStart..ScopeEnd }
+      steps:
+        - { event: Call, attrs: { name.regex: "^(begin|beginTransaction)$" } }
+        - alt:
+            - [ { event: Call, attrs: { name: "commit" } } ]
+            - [ { event: Call, attrs: { name: "rollback" } } ]
+          negate: true
+          quant: zero_or_more
+    message: "Transaction opened with begin() has no commit()/rollback() in this scope."

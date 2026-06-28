@@ -1,0 +1,17 @@
+# Rust build artifacts (Cargo workspace lives in codepolicy/)
+target/
+**/*.rs.bk
+
+# Cargo.lock is committed: this is a binary/application crate, not a library.
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# Claude Code personal (local) settings — shared settings.json may be committed.
+.claude/settings.local.json

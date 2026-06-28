@@ -1,0 +1,16 @@
+[package]
+name = "codepolicy-rules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rule schema, YAML loading and compilation for codepolicy"
+
+[dependencies]
+codepolicy-events.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+regex.workspace = true
+globset.workspace = true
+thiserror.workspace = true
+camino.workspace = true

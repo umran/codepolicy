@@ -1,0 +1,13 @@
+[package]
+name = "codepolicy-match"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Event indexing and rule matching for codepolicy"
+
+[dependencies]
+codepolicy-events.workspace = true
+codepolicy-rules.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+camino.workspace = true
