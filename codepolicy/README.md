@@ -77,8 +77,8 @@ the actual syntax; each was run against the tool.
 ```
 # a comment runs to end of line, anywhere
 rule no_console (warning) {        # severity is (error) or (warning)
-  match Call[name = "console"]
-  message "Use the logger."
+  match Call[receiver = "console"] # console.log(...), console.error(...), etc.
+  message "Use the logger, not console."
 }
 ```
 
@@ -166,6 +166,23 @@ the argument's *syntactic* form — `string`, `template`, `number`, `bool`,
 `identifier`, `member`, `call`, `object`, `array`, `function`, `regex`, `null`,
 `undefined`, `other` — taken from the parse node, not an inferred type. For a
 member call, `name` is the method only and `callee` is the full `obj.method`.
+
+**Nested receivers.** The receiver is the whole object expression, flattened to
+one string. `a.b.c.d.someMethod()` gives `name = "someMethod"`, `receiver =
+"a.b.c.d"`, `callee = "a.b.c.d.someMethod"`. Call sugar only writes a
+single-segment receiver (`obj.method()`), so match deeper chains with `Call[…]`
+predicates on `name`, `callee`, or `receiver`:
+
+```
+match Call[name = "someMethod"]                  # any someMethod(), any depth, incl. a plain call
+match Call[callee ~ /\.someMethod$/]             # a method call of any depth (not a plain call)
+match Call[name = "someMethod", receiver ~ /./]  # same: receiver ~ /./ requires a receiver to exist
+match Call[callee = "a.b.c.d.someMethod"]        # the exact chain
+match Call[receiver ~ /^a\.b\./]                 # any chain starting a.b.
+```
+
+`receiver ~ /./` excludes plain calls because they carry no `receiver` attribute,
+and a predicate on an absent attribute never matches.
 
 Gotcha: inside a *single* call, a `$var` is just a wildcard — `copy($x, $x)`
 matches any two arguments, not two equal ones. To require two arguments of one
