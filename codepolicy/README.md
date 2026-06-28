@@ -1,372 +1,407 @@
 # codepolicy
 
 codepolicy checks a codebase against rules you define and reports each violation
-with its file and line. A rule is a structural constraint over code — for
-example, an import allowed only in certain paths, a call that must be paired with
-another in the same scope, or a banned construct. The tool has no built-in notion
-of correct code; it enforces the rules you write. It exits non-zero on error-level
-violations, so it works as a local check, a CI gate, or an agent feedback loop.
+with its file and line. A rule is a structural constraint over code — an import
+allowed only in certain paths, a call that must be paired with another in the
+same scope, a banned construct, a dependency that needs sign-off. The tool has no
+built-in notion of correct code; it enforces the rules you write.
+
+Exit codes: `0` clean, `1` an error-level violation was found, `2` the rules file
+is malformed. So it drops into a pre-commit hook, a CI gate, or an agent loop.
 
 The approach follows NASA/JPL's Cobra: pattern rules over a flat stream of code
 facts, each match carrying file and line evidence.
 
-## How it sees code
+## The two layers
 
-Rules match over two layers, never over raw text. A frontend produces them from a
-single parse of each file.
+A *frontend* turns a source file into up to two layers. **Which layers a frontend
+produces is its own implementation choice.**
 
-**Structural layer.** Normalized constructs projected from the parse, as a flat
-`Vec<Event>`. An `Event` is:
+- The **token layer** is a flat stream of every lexical/syntactic token. Producing
+  it needs only a lexer. It is, in effect, a linked list of tokens (each token
+  knows its neighbours and its matching delimiter), and token rules are regular —
+  one token, tested by equality, regex, or a numeric field. Scanning it is linear
+  and cheap.
+- The **canonical event layer** is a set of *normalized* constructs — `Import`,
+  `Call`, `TypeDecl`, `EnvAccess`, `ScopeStart`, … — with structured attributes.
+  Producing it requires understanding structure, i.e. a parse.
 
-```rust
-struct Event {
-    kind: EventKind,              // Import, Call, TypeDecl, EnvAccess, ScopeStart, …
-    language: Language,
-    file: Arc<Utf8PathBuf>,       // shared by every event of a file
-    span: Span,                   // 1-based line/col, end-exclusive; 0-based byte offsets
-    attrs: BTreeMap<String, serde_json::Value>,
-}
+A frontend may emit only tokens (a lexer), only canonical events (the bundled
+`package.json` reader does this), or both from one parse (the bundled
+TypeScript/JavaScript frontend does this).
+
+**What the canonical layer buys you over raw tokens.** Tokens give you regular,
+single-token matching. Canonical events add three things the token layer cannot
+express:
+
+1. *Normalized, cross-language kinds.* `Import` means the same thing in any
+   language with a frontend, so one rule ports across languages.
+2. *Structured attributes.* A `Call` carries `name`, `receiver`, `arg0…argN`,
+   `arg_count`; an `Import` carries `source` and `symbols` — instead of raw token
+   text you would otherwise have to re-parse.
+3. *Relational matching.* Sequences, scope predicates, captures/backreferences,
+   and composition all operate on events. Token rules are single-construct only.
+
+**The canonical vocabulary is fixed and deliberately small** (`File`,
+`PackageAdded`, `Import`, `Export`, `Call`, `NewExpr`, `TypeDecl`, `FunctionDecl`,
+`MethodDecl`, `ClassDecl`, `Attribute`, `EnvAccess`, `StringLiteral`, `Comment`,
+`ScopeStart`, `ScopeEnd`, `GraphqlOperation`, `GeneratedFile`, `ConfigFile`,
+`Token`), and a frontend only fills the kinds and attributes it implements. For
+any construct outside that set — a `switch`, a ternary, a decorator, a specific
+operator — you reach for the token layer, which can match any node. Expect most
+arbitrary, project-specific rules to use the token layer; the canonical layer is
+where cross-construct logic lives. Extending the canonical layer (new kinds, more
+attributes) is a frontend change.
+
+**Cost.** The token stream is cheap: a flat array matched by regular expressions.
+The parse that produces canonical events is the heavier operation, and at millions
+of lines it is the dominant cost — so a token-only frontend is far cheaper than a
+parsing one. (In the current TS/JS frontend both layers come from a single
+tree-sitter parse, so that parse is paid whenever events are needed; the token
+array itself is built only when a loaded rule references the `Token` kind.)
+
+Before writing a rule, dump what a file actually produces:
+
+```bash
+codepolicy events path/to/File          # canonical events with their attributes
+codepolicy events path/to/File --tokens # the token layer (node kinds, fields)
 ```
-
-The `EventKind` vocabulary is fixed: `File`, `PackageAdded`, `Import`, `Export`,
-`Call`, `NewExpr`, `TypeDecl`, `FunctionDecl`, `MethodDecl`, `ClassDecl`,
-`Attribute`, `EnvAccess`, `StringLiteral`, `Comment`, `ScopeStart`, `ScopeEnd`,
-`GraphqlOperation`, `GeneratedFile`, `ConfigFile`, and `Token`. These names are
-the `Kind` you write in a rule. A rule against this layer is language-independent:
-it applies to every language with a frontend.
-
-Every predicate reads an attribute and normalizes its JSON value to a list of
-strings before testing: a scalar becomes one string, an array becomes its
-elements, objects and null become nothing. So `symbols ~ /^use/` tests each name
-in the `symbols` array independently.
-
-**Token layer.** Every node of the parse, as a flat `Vec<Token>`. A `Token` is a
-`Copy` struct with no owned strings — node kind, text, and enclosing-function name
-are interned to `u32` ids (`Sym`) in a per-file `Interner`:
-
-```rust
-struct Token {
-    kind: Sym, text: Sym, func: Sym,        // interned strings
-    named: bool,                            // named node vs. bare symbol (`switch_statement` vs `switch`)
-    start_byte: u32, end_byte: u32,
-    start_line: u32, start_col: u32, end_line: u32, end_col: u32,
-    curly: u16, round: u16, bracket: u16,   // nesting depths at this token
-    jmp: u32,                               // index of the matching delimiter, or NO_JMP (u32::MAX)
-}
-```
-
-The stream is one contiguous allocation; previous and next token are index ±1, and
-`jmp` links each `(`/`{`/`[` to its partner (paired in one stack pass over the
-stream). The token layer is built only when a loaded rule references the `Token`
-kind — single-event rules that never touch it pay nothing.
-
-Use the structural layer for the concepts it names. Use the token layer for
-anything it does not.
 
 ## Writing rules
 
-Rules are written in a textual grammar. A rule names what to match, optionally
-restricts it by language and path, and attaches a message. The basic form is a
-single construct with attribute predicates:
+Rules are written in a textual grammar (`codepolicy.rules`). Examples below are
+the actual syntax; each was run against the tool.
+
+### Rule shape, severity, comments
 
 ```
-rule NO_RAW_ENDPOINT_FETCH (error) {
-  match Call[name = "fetch", string_args ~ /\/graphql/]
-  message "Don't call the GraphQL endpoint directly — use the generated client."
+# a comment runs to end of line, anywhere
+rule no_console (warning) {        # severity is (error) or (warning)
+  match Call[name = "console"]
+  message "Use the logger."
 }
 ```
 
-`Kind[ … ]` matches a construct of that kind whose attributes satisfy every
-predicate (all ANDed). Operators:
+`(error)` fails the run; `(warning)` is reported but exits `0`. Omitting the
+parens defaults to **error**. The smallest legal rule is `rule NAME { <body> }`.
+Rule names are identifiers — letters, digits, underscore; **no hyphens**. A file
+holds many rules, separated by blank lines.
 
-| Syntax                      | Holds when                                                  |
-| --------------------------- | ----------------------------------------------------------- |
-| `attr = "v"` / `attr = 5`   | some string form of the attribute equals `v`                |
-| `attr ~ /re/`               | some string form matches the regex                          |
-| `attr !~ /re/`              | no string form matches the regex                            |
-| `attr in ["a", "b"]`        | some string form is in the set                              |
-| `attr > 5` (`< >= <=`)      | some string form parses as a number and compares true       |
-| `attr == $v` / `attr != $v` | equals / differs from a captured value (see Unification)    |
+`desc "…"` documents a rule and `message "…"` is the remediation; both are
+optional. In `agent` output they render as the `why:` and `fix:` lines.
 
-### Scoping
-
-A rule applies to all files by default. `lang` restricts it by language; `in` and
-`not in` filter by glob. Excludes are checked first and win over includes:
+### Language and path scope
 
 ```
-rule NO_PROVIDER_SDK_OUTSIDE_INFRA (error) {
-  lang typescript, javascript, go, python
-  in  "services/**", "apps/**"
-  not in "**/infrastructure/**"
-  match Import[source ~ /^(aws-sdk|@aws-sdk\/.*|stripe|twilio|googleapis)$/]
-  message "Use provider SDKs only from the approved infrastructure layer."
+rule no_provider_sdk (error) {
+  lang typescript, javascript        # omit `lang` to apply to all languages
+  in  "services/**", "apps/**"       # include globs (a file must match one)
+  not in "**/generated/**"           # exclude globs
+  match Import[source ~ /^aws-sdk$/]
+  message "Provider SDKs belong in the infrastructure layer."
 }
 ```
 
-### Calls, arguments, receivers
+A file is in scope iff it matches an include **and** matches no exclude —
+**excludes win**. Globs match the path relative to the directory being checked
+(e.g. `services/api/x.ts`), and `*` crosses `/`, so anchor with `**/dir/**` or
+`dir/**` rather than a bare token. Scope is per-rule.
 
-Calls can be written with positional arguments instead of named attributes. The
-sugar desugars to ordinary predicates on `name`, `receiver`, `arg0…argN`,
-`argN_kind`, and `arg_count`:
+### Matching one construct
+
+`match Kind[pred, pred]` matches a construct whose attributes satisfy every
+predicate (predicates are ANDed). `match Kind` with no brackets matches every such
+construct.
+
+| Predicate                   | Holds when                                                |
+| --------------------------- | --------------------------------------------------------- |
+| `attr = "v"` / `attr = 5`   | a value equals `v` (equality coerces string ↔ number)     |
+| `attr ~ /re/`               | a value matches the regex (unanchored)                    |
+| `attr !~ /re/`              | no value matches the regex                                |
+| `attr in ["a", "b"]`        | a value is in the set                                     |
+| `attr > 5` (`< >= <=`)      | a numeric value compares true                             |
+| `attr == $v` / `attr != $v` | a value equals / differs from a captured variable         |
 
 ```
-log(_, $level: string, ..)          # name="log", arg1 captured, arg1_kind="string", arg_count>=2
-db.query($sql: string)              # name="query", receiver="db", arg0 captured, arg0_kind="string", arg_count=1
+match Import[source = "express"]                 # exact string
+match Call[arg_count > 2]                         # numeric, on a structural attr
+match Comment[text ~ /TODO/]                      # regex search
+match EnvAccess[name !~ /^AWS_/]                  # negated regex
+match Call[name in ["eval", "exec", "fetch"]]     # membership
+match TypeDecl[decl_kind = "interface"]           # interface vs type
+match EnvAccess                                   # bare kind: every match
 ```
 
-- The receiver is the object before the method. `obj.method(…)` adds
-  `receiver = "obj"`; `$obj.method(…)` captures or constrains it.
-- Each argument is `_` (no predicate), a literal, or a `$capture`, each with an
-  optional `: kind`. The kind is the argument's syntactic form (`string`,
-  `number`, `bool`, `identifier`, `member`, `call`, `object`, `array`, `function`,
-  `regex`, `template`, `null`, `undefined`, `other`) — how it is written, taken
-  from the parse node type, not an inferred static type.
-- A trailing `..` sets `arg_count >= N` instead of exact arity. Without it, the
-  arity is exact (`arg_count = N`).
+Two semantics to internalize:
 
-The frontend records the first 32 arguments per call (`arg_count` still reflects
-the true total).
+- **List attributes are tested element-wise.** `Import.symbols` is a list, so
+  `symbols = "useQuery"`, `symbols in ["useQuery"]`, and `symbols ~ /^use/` each
+  hold if *any* element does. Same for `string_args`.
+- **A predicate on an attribute the kind doesn't carry never matches** — it is not
+  an error. A typo'd attribute silently disables the rule, so confirm names with
+  `codepolicy events` first.
+
+Every event also carries structural attributes you can match on: `curly_depth`,
+`round_depth`, `bracket_depth` (nesting at the construct), `range_lines`,
+`text_len`, and `function` (the enclosing function, when inside one).
+
+### Calls
+
+Calls can be written with positional arguments after `match`. This desugars to
+predicates on `name`, `receiver`, `arg0…argN`, `argN_kind`, and `arg_count`.
+
+```
+match foo(_, _, _)             # exactly three arguments (arg_count = 3)
+match foo(_, _, ..)            # two or more (arg_count >= 2); `..` must be last
+match db.query(_)              # literal receiver: name="query", receiver="db"
+match $obj.query(_)            # any receiver, but there must be one
+match exec("rm", force)        # arg0 is the string "rm"; arg1 is the identifier `force`
+match run(42)                  # arg0 is the numeric literal 42
+match handle($a: string)       # arg0's syntactic kind is string
+```
+
+Argument patterns: `_` (any), a quoted string literal, a bareword (an exact
+identifier name), a number, or `$var`, each with an optional `: kind`. A kind is
+the argument's *syntactic* form — `string`, `template`, `number`, `bool`,
+`identifier`, `member`, `call`, `object`, `array`, `function`, `regex`, `null`,
+`undefined`, `other` — taken from the parse node, not an inferred type. For a
+member call, `name` is the method only and `callee` is the full `obj.method`.
+
+Gotcha: inside a *single* call, a `$var` is just a wildcard — `copy($x, $x)`
+matches any two arguments, not two equal ones. To require two arguments of one
+call be equal, use `match Call[arg0 == $x, ...]`-style backreferences, or correlate
+across sequence steps (below). Captures across steps do work.
 
 ### Captures and unification
 
-A `$name` binds on its first use and constrains on every later use, so one rule
-correlates two positions by the same value. Binding is tracked per rule: the first
-`$obj` in a call-sugar pattern (or an `as v = attr` clause) records that the
-variable captures that attribute; a later `$obj` compiles to an `== ` backreference
-against it. Inside an explicit `Kind[…]`, `attr == $v` and `attr != $v` are always
-backreferences — the variable must have been bound earlier in the rule.
+`$x` binds the first time it appears and constrains every later appearance to the
+same value. Binding is per-rule. Across sequence steps this correlates two
+constructs by a shared value:
+
+```
+sequence in scope {
+  Call[name = "lock"] as r = arg0      # bind r from arg0
+  any *
+  Call[name = "unlock", arg0 == $r]    # require the same arg0
+  any *
+}
+```
+
+`as v = attr` is the explicit form; the `$r` in `lock($r: string)` call-sugar is
+the shorthand. Inside `Kind[…]`, `==` and `!=` are *always* backreferences (use
+`attr = "v"` for a literal).
 
 ### Sequences
 
-A sequence matches an ordered run of constructs, optionally confined to one
-enclosing scope. With capture, this expresses acquire-without-release rules: the
-violation is the acquire with no matching release in the same scope.
+A sequence matches an ordered run of constructs. The matcher tries every start
+position; from there the steps must consume the region to its end. `in scope`
+makes the region each `{}` block's interior; without it the region is the whole
+file.
 
 ```
-rule LISTENER_LEAK (warning) {
+sequence in scope {
+  validate()
+  log() *           # quantifiers: ? (0–1), * (0+), + (1+) on the preceding step
+  save()
+}
+```
+
+```
+sequence in scope {
+  start()
+  ( stop() | pause() )    # alternation; each arm is one matcher
+}
+```
+
+```
+sequence in scope {
+  init()
+  any              # one construct of any kind; `any *` soaks the rest
+  done()
+}
+```
+
+- A bare `not X` consumes exactly one construct that must not match `X`. A
+  quantified `not X *` consumes a run of non-`X` constructs.
+- Because matching is end-anchored, a trailing `not X *` means *"and no `X` in the
+  rest of the region."* This is the acquire-without-release idiom:
+
+```
+rule listener_leak (warning) {
   sequence in scope {
     $obj.addEventListener($ev, ..)
     not $obj.removeEventListener($ev, ..) *
   }
-  message "addEventListener has no matching removeEventListener (same object + event)."
+  message "addEventListener with no matching removeEventListener (same object + event)."
 }
 ```
 
-Mechanics. The steps run against a region of events: the whole file, or — with
-`in scope` — the interior of each `{}` block (paired by scope id). Matching is
-tried from every start index in the region, and from that index the steps must
-consume the rest of the region exactly to its end. So a trailing `not … *` means
-"and nothing in the remainder of the scope matches." Each start index that
-succeeds reports its first event, deduplicated by byte offset (an event inside
-nested scopes is reported once per rule).
+It fires when no matching removal exists, stays silent when one appears later in
+the scope (intervening statements don't matter, because the negated `*` absorbs
+them), and still fires if a removal targets a *different* captured object or
+event. The negated `*` is what spans the gap — there is no separate wildcard
+between the two steps.
 
-A step may carry:
-
-- a quantifier — `?` (zero or one), `*` (zero or more), `+` (one or more);
-- `not` — the step's match is inverted, so `not X *` consumes a run of non-`X`;
-- alternation — `( A | B )`, where each arm is one matcher;
-- `any` — the wildcard kind;
-- `as v = attr, …` — capture one or more attributes, in addition to `$…`.
-
-Backreferences (`$ev` reused, or `attr == $v`) compare against the first string
-form captured into the variable, so `$obj … $obj` keys on the same object.
+Gotcha: a call with arguments emits a trailing `StringLiteral`/argument events
+right after its `Call`. In a *pairing* sequence (`open(...)` … `close(...)`),
+insert `any *` between and after the steps to absorb those, or the end-anchoring
+fails. The leak idiom above avoids this because its trailing negated `*` already
+absorbs everything.
 
 ### Scope predicates
 
-To ask about the block a construct sits in without writing a full sequence:
+A `match` rule can ask about the construct's enclosing `{}` scope without a full
+sequence:
 
 ```
-rule LOCK_WITHOUT_UNLOCK (error) {
-  match Call[name ~ /acquire$/]
-  where scope not contains Call[name ~ /release$/]
-  message "A lock acquired here is never released in the same scope."
+rule query_needs_getdb (error) {
+  match $db.query(_)
+  where scope not contains getDb()
+  message "A query must run in a scope that also calls getDb()."
 }
 ```
 
-The matched event's enclosing scope is the innermost `ScopeStart`/`ScopeEnd` pair
-whose byte range contains it (the whole file if none). Clauses: `where scope
-contains …`, `where scope not contains …`, and `where scope followed by …`
-(matches an event after this one in the same block). Multiple clauses on one rule
-are ANDed.
+Clauses: `where scope contains …`, `where scope not contains …`, and `where scope
+followed by …` (which is order-sensitive — the construct must appear *after* the
+matched one in the same scope). Multiple clauses are ANDed. `where scope` attaches
+only to a `match` body.
 
 ### Composition and counting
 
-A rule can be derived from other rules in a pass that runs after all single and
-sequence rules have produced their violations:
+These run after the single and sequence rules, over their results.
 
 ```
-rule HOTSPOT (warning) {
-  compose intersection of TOUCHES_AUTH, TOUCHES_BILLING by file, function
-  message "A function that reaches both auth and billing."
+rule uses_fetch (warning) { match fetch(_) }
+rule uses_eval  (warning) { match eval(_) }
+
+rule fetch_and_eval (error) {
+  compose intersection of uses_fetch, uses_eval by function
+  message "One function uses both fetch and eval."
 }
 
-rule TOO_MANY_ENV_READS (warning) {
-  count RAW_ENV_ACCESS per file > 10
-  message "This file reads the environment directly more than ten times."
-}
-```
-
-`compose` groups each referenced rule's violations by a key tuple (`by file,
-function`; default `file`). `intersection` keeps keys present in every referenced
-rule, `union` keeps keys present in any, `difference` keeps keys in the first rule
-and none of the rest; it emits one violation per surviving key. `count` groups one
-rule's violations per `file` or per `function` and emits when the group size
-compares true (`>`, `<`, `>=`, `<=`, `==`) against the threshold. Aggregates read
-only the primary violations, never each other.
-
-### Token layer
-
-Constructs the structural layer does not name are matched by native `node_kind`:
-
-```
-rule NO_DEBUGGER (error) {
-  match Token[node_kind = "debugger"]
-  message "Remove debugger statements."
-}
-
-rule NO_TOP_LEVEL_SWITCH (warning) {
-  match Token[node_kind = "switch_statement", curly_depth = 0]
-  message "Replace top-level switch with a lookup table."
+rule too_many_fetch (error) {
+  count uses_fetch per file > 2
+  message "More than two fetch calls in this file."
 }
 ```
 
-Token fields: `node_kind`, `text`, `function` (enclosing function), `named`,
-`curly_depth` / `round_depth` / `bracket_depth`, `range_lines` (end_line −
-start_line + 1), and `text_len` (byte length). `codepolicy events <file> --tokens`
-lists a file's node kinds. Token rules match a single construct: ordering,
-correlation, and backreferences live in the structural layer (a token rule has no
-binding environment, so `==`/`!=` never match it).
+`compose` groups each referenced rule's violations by a key tuple (`by file`,
+`by function`, or both; default `file`). `intersection` keeps keys present in
+every referenced rule, `union` keys in any, `difference` keys in the first rule
+and none of the rest. It emits one violation per surviving key. `count` groups one
+rule's violations per `file` or `function` and fires when the group size compares
+true (`>`, `<`, `>=`, `<=`, `==`) to the threshold. Referenced base rules still
+report on their own — make them `warning` to keep a composed `error` clean.
 
-### Inline exceptions
+### The token layer
 
-A rule can exempt cases without being disabled:
+`match Token[…]` matches one node of the parse by its native tree-sitter
+`node_kind`. Use `codepolicy events <file> --tokens` to find the exact names.
 
 ```
-rule NO_UNAPPROVED_STATE_LIBRARY (error) {
-  match PackageAdded[name in ["redux", "recoil", "mobx", "xstate"]]
-  unless adr "state management exception"
-  message "Pick a state library through an architecture decision record."
+match Token[node_kind = "switch_statement"]              # a construct with no canonical kind
+match Token[node_kind = "ternary_expression"]
+match Token[node_kind = "=="]                             # the operator symbol itself
+match Token[node_kind ~ /^={2,3}$/]                       # node_kind takes a regex too
+match Token[node_kind = "identifier", text ~ /_/]         # snake_case identifiers
+match Token[node_kind = "statement_block", curly_depth > 2]   # over-nested blocks
+match Token[node_kind = "function_declaration", range_lines > 3]  # long functions
+match Token[node_kind = "string", text_len > 20]          # long string literals
+```
+
+Token fields: `node_kind`, `text`, `function`, `named`, `curly_depth` /
+`round_depth` / `bracket_depth`, `range_lines`, `text_len`. `named` distinguishes a
+parser-named construct from a same-spelled bare symbol and **must be written as a
+string**: `named = "true"` selects the numeric literal `1`; `named = "false"`
+selects the bare `number` keyword token. Token rules are single-construct: a
+`sequence` or `where scope` over `Token` is rejected at load time. For ordered or
+correlated logic, use the canonical kinds.
+
+### Exceptions
+
+A rule can exempt cases inline rather than being switched off:
+
+```
+rule no_env_access (error) {
+  match EnvAccess
+  unless adr "direct-env-access"     # repo-wide, if an accepted ADR exists
+  unless path "**/scripts/**"        # by glob
+  message "Use the config module."
+  unless waiver                      # file-scoped waiver under this rule's id
 }
 ```
 
-`unless path "glob"` exempts matching files; `unless adr "topic"` defers to an
-accepted decision record; `unless waiver` honors a file-scoped waiver.
+- `unless path "glob"` exempts files by glob.
+- `unless adr "topic"` defers to an accepted decision record (repo-wide).
+- `unless waiver` honors a file-scoped waiver under this rule's id; `unless waiver
+  other_id` uses a different id. Place a **bare** `unless waiver` last in the body
+  — the parser otherwise consumes the next keyword (`message`, …) as the waiver
+  id. The explicit `unless waiver other_id` form has no such restriction.
 
-### Other clauses
+## Escape-hatch files
 
-`(error)` / `(warning)` after the rule name sets severity: errors fail a run,
-warnings do not. `message "…"` is shown on a hit; `desc "…"` documents the rule;
-`#` starts a comment. A rule has exactly one body: `match`, `sequence`, `compose`,
-or `count`; `where scope` attaches only to a `match`.
+- **Waivers** — YAML under `.codepolicy/waivers/`, each with a `rule` and a `file`
+  key. A waiver suppresses that rule in that file *unconditionally* — even without
+  an `unless waiver` in the rule. The `file` is an **exact** root-relative path
+  (e.g. `apps/legacy.ts`), not a glob.
+- **ADRs** — YAML under `docs/adr/`, each with `topic` and `status`. A record with
+  `status: accepted` (case-insensitive) satisfies any `unless adr "topic"` guard
+  for that topic, repo-wide.
 
-Every rule has an equivalent YAML form, and `check` reads either format; both
-compile to the same representation. `codepolicy init` writes a starter pack as
-`--format rules` or `--format yaml`.
+Relocate either directory with top-of-file directives, which replace the defaults:
 
-## Escape hatches
+```
+waivers "policy/waivers"
+adrs "policy/decisions"
+```
 
-Two repo-level mechanisms complement the inline `unless` guards:
+## YAML form
 
-- **Waivers** — YAML files under `.codepolicy/waivers/`, each with a `rule` and a
-  `file` key. A waiver suppresses that rule in that file unconditionally,
-  independent of whether the rule has an `unless`.
-- **ADRs** — decision records under `docs/adr/`, each with `topic` and `status`. A
-  record whose status is `accepted` (case-insensitive) satisfies any `unless adr
-  "topic"` guard with that topic.
-
-A candidate violation is dropped if a waiver names its `(rule, file)`, or its
-rule's `unless` matches. Both directories are configurable (`waivers`/`adrs`
-directives, or `waivers_dir`/`adr_dir` in YAML).
-
-## How a check runs
-
-`Project::check` is the pipeline:
-
-1. **Discover.** Walk the root with the `ignore` crate, honoring `.gitignore`,
-   keeping only UTF-8 paths a frontend claims, sorted for determinism.
-2. **Extract.** Process files in parallel (`rayon`). Each frontend returns
-   `(Vec<Event>, Option<TokenStream>)`. The token stream is requested only if some
-   loaded rule references the `Token` kind. A file that fails to parse prints a
-   warning and contributes nothing; the run continues.
-3. **Index.** `EventIndex` builds two maps over the combined events: `by_kind`
-   (each kind's events in encounter order) and `by_file` (each file's events
-   sorted by start byte, for sequence and scope matching).
-4. **Match.** Two passes. Pass one runs every non-aggregate rule: a `Token` rule
-   scans the token streams, a sequence rule runs the matcher over each file or
-   scope region, a single rule scans `by_kind[event]` and, if present, evaluates
-   its `where scope`. Pass two runs `compose`/`count` over a snapshot of pass-one
-   violations. A violation is emitted only after passing the suppression gate
-   (waiver or `unless`).
-5. **Sort.** Violations are ordered by file, line, column, then rule id.
-
-Single-event rules scan only the events of their kind, not every event, so cost
-scales with matches rather than rules × events.
+Every rule has an equivalent YAML form, and `check` reads either; both compile to
+the same representation. `codepolicy init` writes a starter pack as `--format
+rules` or `--format yaml`.
 
 ## Running it
 
 ```bash
 codepolicy init                            # write a starter rule pack
 codepolicy check                           # check the current repo
-codepolicy check services/ --format agent  # output for a subtree
+codepolicy check services/ --format agent  # check a subtree, agent output
 codepolicy check --rules my.rules --format json
-codepolicy events path/to/File             # dump the structural events for a file
-codepolicy events path/to/File --tokens    # add the resolved token layer
-codepolicy explain-rule NO_DEBUGGER        # show how a rule is interpreted
+codepolicy events path/to/File [--tokens]  # inspect what a file produces
+codepolicy explain-rule no_env_access      # show how a rule compiles
 ```
 
 `check` discovers a `codepolicy.rules` or `codepolicy.yaml` at the root, or takes
-`--rules <file>`. Exit codes: `1` if any error-level violation is found, `0` if
-clean, `2` on a usage or I/O error. The three formats:
+`--rules <file>`, and scans supported files in parallel. The three output formats:
 
 - **human** — per violation: `SEVERITY rule_id`, `file:line:col`, the description,
-  a `Matched:` line summarizing the construct, and a `Remediation:` line; a footer
-  counts errors and warnings.
-- **json** — `{ "violations": [...], "summary": { "errors", "warnings", "total" } }`,
-  each violation carrying `rule_id`, `severity`, `file`, `span`, and the matched
-  construct.
-- **agent** — terse, compiler-like: `SEVERITY rule_id at file:line:col` followed by
-  `matched:`, `why:`, and `fix:` lines, ending with an instruction to fix errors
-  before committing.
+  a `Matched:` line, a `Remediation:` line; a footer counts errors and warnings.
+- **json** — `{ "violations": [...], "summary": { errors, warnings, total } }`.
+- **agent** — terse: `SEVERITY rule_id at file:line:col`, then `matched:`, `why:`,
+  `fix:` lines:
 
-## Languages
+```
+WARNING listener_leak at apps/widget.ts:3:3
+  matched: Call name="addEventListener" receiver="el" arg0="click" ...
+  fix: addEventListener with no matching removeEventListener (same object + event).
+
+codepolicy: 0 error(s), 1 warning(s). Fix the errors above before committing.
+```
+
+## Languages and frontends
 
 The grammar, the matcher, and both layers are language-independent. A language is
-supported by a frontend that turns a file into the token layer, the structural
-layer, or both. Frontends ship for TypeScript / JavaScript (tree-sitter) and for
-package manifests; a rule against the structural layer applies to a language the
-moment its frontend exists.
-
-### How the TypeScript/JavaScript frontend works
-
-One tree-sitter parse, one recursive walk. At each node the walk: emits a
-structural event if the node maps to one (`import_statement` → `Import` with
-`source` and `symbols`; `call_expression` → `Call` with `name`, `callee`,
-`receiver`, `string_args`, `arg_count`, and per-position `argN`/`argN_kind`;
-`interface`/`type_alias` → `TypeDecl`; function declarations → `FunctionDecl`;
-`process.env.X` and `process.env["X"]` → `EnvAccess`; `comment` → `Comment`;
-`string` → `StringLiteral`); appends a `Token` for the node when tokens are
-requested; and, for `statement_block`/`class_body`, emits paired
-`ScopeStart`/`ScopeEnd` events with a per-file scope id. A `Frame` carried down the
-walk tracks nesting depth (`statement_block`/`class_body` raise curly depth;
-argument and parameter lists and parenthesized expressions raise round depth;
-arrays raise bracket depth) and the enclosing function name; these become the
-`curly_depth`/`round_depth`/`bracket_depth`/`range_lines`/`text_len`/`function`
-attributes on every event. After the walk, delimiter tokens are paired into `jmp`
-links with a stack. The manifest frontend instead reads `package.json` and emits a
-`PackageAdded` event per dependency across the four dependency sections; it
-produces no tokens.
-
-### Adding a frontend
-
-The contract is one trait:
+supported by a frontend, and the frontend decides which layers it provides. The
+contract is one trait:
 
 ```rust
 pub struct SourceFile<'a> { pub path: Utf8PathBuf, pub text: &'a str }
 
 #[derive(Default)]
 pub struct Extracted {
-    pub tokens: Option<TokenStream>, // the token layer
-    pub events: Vec<Event>,          // the structural layer (optional)
+    pub tokens: Option<TokenStream>, // the token layer (a lexer is enough)
+    pub events: Vec<Event>,          // the canonical layer (requires a parse)
 }
 
 pub trait LanguageFrontend: Sync {
@@ -376,12 +411,13 @@ pub trait LanguageFrontend: Sync {
 }
 ```
 
-A frontend can produce the token layer alone (a lexer suffices), the structural
-layer alone (as the manifest frontend does), or both. Implement the trait in a
-module under `codepolicy-frontends/src/`, register it in `default_frontends()`, and
-add a fixture and assertion in `crates/codepolicy-cli/tests/fixtures.rs`. Follow
-the conventions: 1-based, end-exclusive spans; set `language` on everything
-emitted; reuse the attribute names above so existing rules apply unchanged.
+`want_tokens` is set only when a loaded rule references the `Token` kind, so a
+frontend can skip building the token array otherwise. To add a language, implement
+the trait under `codepolicy-frontends/src/`, register it in `default_frontends()`,
+and add a fixture and assertion in `crates/codepolicy-cli/tests/fixtures.rs`. Use
+1-based, end-exclusive spans, set `language` on everything emitted, and reuse the
+attribute names above so existing rules apply unchanged. The shipped frontends are
+`ts_js.rs` (parser, both layers) and `manifest.rs` (canonical events only).
 
 ## Architecture
 
@@ -389,10 +425,10 @@ A Cargo workspace:
 
 | Crate                  | Responsibility                                                       |
 | ---------------------- | ------------------------------------------------------------------- |
-| `codepolicy-events`    | The structural model (`Event` / `EventKind` / `Span` / `Language`) and the token layer (`Token` / `TokenStream` / `Interner`) |
-| `codepolicy-frontends` | `LanguageFrontend` and the shipped frontends (tree-sitter TS/JS, manifest) |
-| `codepolicy-rules`     | Rule grammar (textual DSL + YAML), compilation to `CompiledRule`, the attribute predicate language |
-| `codepolicy-match`     | `EventIndex` and matching: single construct, sequences, scope predicates, compose/count, token rules, waiver/ADR/`unless` evaluation |
+| `codepolicy-events`    | The canonical model (`Event` / `EventKind` / `Span` / `Language`) and the token layer (`Token` / `TokenStream` / `Interner`) |
+| `codepolicy-frontends` | `LanguageFrontend` and the shipped frontends                        |
+| `codepolicy-rules`     | Rule grammar (textual DSL + YAML), compilation, the predicate language |
+| `codepolicy-match`     | Indexing and matching: single construct, sequences, scope predicates, compose/count, token rules, waiver/ADR/`unless` |
 | `codepolicy-report`    | `human` / `json` / `agent` rendering                                |
 | `codepolicy-core`      | `Project`: discovery, parallel extraction, the check pipeline       |
 | `codepolicy-cli`       | The `codepolicy` binary, the bundled starter packs, fixtures        |
