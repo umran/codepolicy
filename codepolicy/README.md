@@ -277,6 +277,87 @@ sequences and `where_scope` over tokens are rejected at compile time.
 | `codepolicy-core`       | Discovery, parallel extraction, the check pipeline        |
 | `codepolicy-cli`        | The `codepolicy` binary; bundled starter rules; fixtures  |
 
+## Adding a language frontend
+
+A frontend turns one source file into up to two streams. The whole contract is
+one trait in `codepolicy-frontends`:
+
+```rust
+pub struct SourceFile<'a> { pub path: Utf8PathBuf, pub text: &'a str }
+
+#[derive(Default)]
+pub struct Extracted {
+    pub tokens: Option<TokenStream>, // universal, compact token layer (Cobra-style)
+    pub events: Vec<Event>,          // optional canonical overlay (Import, Call, …)
+}
+
+pub trait LanguageFrontend: Sync {
+    fn name(&self) -> &'static str;                 // for diagnostics
+    fn supports_file(&self, path: &Utf8Path) -> bool;
+    fn extract(&self, file: &SourceFile<'_>, want_tokens: bool) -> anyhow::Result<Extracted>;
+}
+```
+
+Two output streams, two jobs:
+
+- **Token stream** (`Extracted.tokens`) — the universal primary layer. Fill it
+  only when `want_tokens` is true (the pipeline sets that only if a loaded rule
+  references `Token`, so canonical-only runs pay nothing). Producible by a plain
+  **lexer** — no parse tree required. This is what `match Token[node_kind = …]`
+  rules see.
+- **Canonical events** (`Extracted.events`) — the optional, normalized,
+  cross-language overlay (`Import`, `Call`, `EnvAccess`, `TypeDecl`, …). This is
+  what every non-`Token` rule matches. A lexer-only frontend may leave it empty;
+  a parser-based frontend projects its tree down to these kinds.
+
+So a frontend can be **lexer-only** (tokens, no events), **structured-only**
+(events, no tokens — like the `package.json` manifest frontend), or **both**
+from a single parse (like the TS/JS frontend).
+
+### Steps
+
+1. **Register the `Language`** (`codepolicy-events`): if your language isn't
+   already in the `Language` enum, add a variant and a `from_extension` arm.
+   (`Go`, `Python`, `Rust` are already listed — a frontend is all that's
+   missing for those.) The lowercase serde name is what rule files match in
+   `lang <name>`.
+2. **Add a module** under `codepolicy-frontends/src/` and implement
+   `LanguageFrontend`. `supports_file` keys off the extension; `extract` builds
+   `Extracted`. If you use tree-sitter, add the grammar crate to that crate's
+   `Cargo.toml` (see how `tree-sitter-typescript` / `tree-sitter-javascript` are
+   wired in `ts_js.rs`).
+3. **Register it** in `default_frontends()` (`codepolicy-frontends/src/lib.rs`).
+   `frontend_for` returns the first frontend whose `supports_file` matches, so
+   order matters if extensions overlap.
+4. **Add a fixture** under `fixtures/` (the workspace root, where the existing
+   `repo`/`token_repo`/… live) and an assertion in
+   `crates/codepolicy-cli/tests/fixtures.rs` so the new language's
+   events/tokens are pinned.
+
+### Conventions to honor
+
+- **Spans** are 1-based for line/column and **end-exclusive**; byte offsets are
+  0-based. (`ts_js.rs::span_of` converts tree-sitter's 0-based rows.)
+- **Set `language`** on both `Event` and `TokenStream` to your `Language` so
+  `lang`-scoped rules apply correctly.
+- **Share the file path** as one `Arc<Utf8PathBuf>` across all of a file's
+  events/tokens (`Event::new` takes `impl Into<Arc<…>>`) — emitting one token
+  per node must not reclone the path.
+- **Reuse the canonical attribute vocabulary** so existing rules work
+  unchanged: e.g. `Import` carries `source` + `symbols`; `Call` carries `name`,
+  `callee`, `receiver`, `string_args`, `arg_count`, and per-position
+  `argN`/`argN_kind`; `TypeDecl` carries `decl_kind` + `name`. Attach the
+  reserved structural fields (`curly_depth`, `round_depth`, `bracket_depth`,
+  `range_lines`, `text_len`, `function`) where you can — see
+  `attach_structural`. `argN_kind` is a **syntactic** kind (the literal/
+  expression form), not a static type.
+- **For the token layer**, intern every string (`Interner`), set the nesting
+  depths and enclosing `func` per token, and pair delimiters into `jmp` links
+  (the `TokenBuilder::push` / `finish_jmp` pattern in `ts_js.rs`).
+
+The two reference frontends are the templates: `ts_js.rs` (tree-sitter,
+both streams from one walk) and `manifest.rs` (structured-only, ~60 lines).
+
 ## Tests
 
 - Per-crate unit tests (event serde, rule compilation, matching, reporting).
