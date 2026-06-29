@@ -1,6 +1,6 @@
-# codepolicy
+# tyrant
 
-codepolicy is a rule engine for source code. You write rules — declarative
+tyrant is a rule engine for source code. You write rules — declarative
 patterns over a file's **lexemes** — and it scans a repository and reports every
 match as `file:line` evidence with a message. It has no built-in notion of
 correct code; it enforces exactly the rules you write.
@@ -58,12 +58,12 @@ Each token carries:
 - `range_lines`, `text_len` — lines / bytes the lexeme spans
 
 Each token also links to its matching delimiter (`{`↔`}`, `(`↔`)`, `[`↔`]`),
-which is how scopes are defined. Inspect a file's stream with `codepolicy tokens
+which is how scopes are defined. Inspect a file's stream with `tyrant tokens
 <file>`.
 
 ## Rule basics
 
-Rules are written in a textual grammar (`codepolicy.rules`); each also has an
+Rules are written in a textual grammar (`tyrant.rules`); each also has an
 equivalent YAML form, and `check` reads either. A rule is an envelope around one
 matching body:
 
@@ -248,7 +248,7 @@ rule no_console (warning) {
 
 Two repo-level files back these:
 
-- **Waivers** — YAML under `.codepolicy/waivers/`, each with a `rule` and a `file`
+- **Waivers** — YAML under `.tyrant/waivers/`, each with a `rule` and a `file`
   key. A waiver suppresses that rule in that file unconditionally (the `file` is
   an exact root-relative path).
 - **ADRs** — YAML under `docs/adr/`, each with `topic` and `status`. A record
@@ -261,15 +261,15 @@ Relocate either directory with top-of-file directives: `waivers "dir"`, `adrs
 ## Running it
 
 ```bash
-codepolicy init                            # write a starter rule pack
-codepolicy check                           # check the current repo
-codepolicy check src/ --format agent       # check a subtree, agent output
-codepolicy check --rules my.rules --format json
-codepolicy tokens path/to/File             # dump a file's lexeme stream
-codepolicy explain-rule no_explicit_any    # show how a rule compiles
+tyrant init                            # write a starter rule pack
+tyrant check                           # check the current repo
+tyrant check src/ --format agent       # check a subtree, agent output
+tyrant check --rules my.rules --format json
+tyrant tokens path/to/File             # dump a file's lexeme stream
+tyrant explain-rule no_explicit_any    # show how a rule compiles
 ```
 
-`check` discovers a `codepolicy.rules` or `codepolicy.yaml` at the root, or takes
+`check` discovers a `tyrant.rules` or `tyrant.yaml` at the root, or takes
 `--rules <file>`, and lexes supported files in parallel. The three output
 formats: **human** (per-violation block with a `Matched:` line and remediation),
 **json** (`{ "violations": [...], "summary": { errors, warnings, total } }`), and
@@ -293,31 +293,31 @@ pub trait Frontend: Sync {
 
 The bundled frontend is `ts_js.rs` (TypeScript/JavaScript via tree-sitter). To
 add a language, implement the trait under
-`codepolicy/crates/codepolicy-frontends/src/`, register it in `frontends()`, and
+`tyrant/crates/tyrant-frontends/src/`, register it in `frontends()`, and
 add a fixture and assertion in
-`codepolicy/crates/codepolicy-cli/tests/fixtures.rs`. Use 1-based, end-exclusive spans, link
+`tyrant/crates/tyrant/tests/fixtures.rs`. Use 1-based, end-exclusive spans, link
 matching delimiters (`{`/`}`/`(`/`)`/`[`/`]`) via `jmp`, and assign each lexeme a
 normalized `class` so `@class` rules apply unchanged.
 
 ## Architecture
 
-A Cargo workspace under `codepolicy/`:
+A Cargo workspace under `tyrant/`:
 
 | Crate                  | Responsibility                                                       |
 | ---------------------- | ------------------------------------------------------------------- |
-| `codepolicy-token`     | The lexeme model: `Token` / `TokenStream` / `Interner` / `Span` / `Language` |
-| `codepolicy-frontends` | `Frontend` and the shipped TypeScript/JavaScript lexer              |
-| `codepolicy-rules`     | Rule grammar (textual DSL + YAML), compilation, the predicate language |
-| `codepolicy-match`     | Matching: single token, sequences, scope predicates, compose/count, waiver/ADR/`unless` |
-| `codepolicy-report`    | `human` / `json` / `agent` rendering                                |
-| `codepolicy-core`      | `Project`: discovery, parallel lexing, the check pipeline           |
-| `codepolicy-cli`       | The `codepolicy` binary, the bundled starter pack, fixtures         |
+| `tyrant-token`     | The lexeme model: `Token` / `TokenStream` / `Interner` / `Span` / `Language` |
+| `tyrant-frontends` | `Frontend` and the shipped TypeScript/JavaScript lexer              |
+| `tyrant-rules`     | Rule grammar (textual DSL + YAML), compilation, the predicate language |
+| `tyrant-match`     | Matching: single token, sequences, scope predicates, compose/count, waiver/ADR/`unless` |
+| `tyrant-report`    | `human` / `json` / `agent` rendering                                |
+| `tyrant-core`      | `Project`: discovery, parallel lexing, the check pipeline           |
+| `tyrant`       | The `tyrant` binary, the bundled starter pack, fixtures         |
 
 ## Build and test
 
 ```bash
-cd codepolicy                 # the Cargo workspace lives here
-cargo build --release         # binary at target/release/codepolicy
+cd tyrant                 # the Cargo workspace lives here
+cargo build --release         # binary at target/release/tyrant
 cargo test                    # unit + end-to-end fixture tests
 cargo clippy --all-targets
 ```

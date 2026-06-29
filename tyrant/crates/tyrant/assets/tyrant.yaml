@@ -1,0 +1,57 @@
+# tyrant starter pack (YAML form).
+# Rules match over the lexer's token stream. See the README for the grammar.
+#
+# Escape hatches:
+#   waivers_dir: .tyrant/waivers   (file-scoped, per-rule exceptions)
+#   adr_dir:     docs/adr              (repo-wide decisions, matched by topic)
+
+rules:
+  - id: NO_DEBUGGER
+    severity: error
+    applies_to:
+      languages: [typescript, javascript]
+    match:
+      text: "debugger"
+    message: "Remove debugger statements before committing."
+
+  - id: NO_CONSOLE
+    severity: warning
+    applies_to:
+      languages: [typescript, javascript]
+      paths:
+        include: ["apps/**", "packages/**"]
+    match:
+      text: "console"
+    message: "Use the logger instead of console.*"
+
+  - id: NO_LOOSE_EQUALITY
+    severity: warning
+    applies_to:
+      languages: [typescript, javascript]
+    match:
+      text: "=="
+    message: "Use === instead of ==."
+
+  - id: TODO_NEEDS_ISSUE
+    severity: warning
+    applies_to:
+      languages: [typescript, javascript]
+    match:
+      class: "comment"
+      text.regex: "\\bTODO\\b"
+      text.not.regex: "(#\\d+|[A-Z][A-Z0-9]+-\\d+|https?://)"
+    message: "Add an issue reference to this TODO, e.g. TODO(#123) or TODO(PROJ-45)."
+
+  - id: NO_SNAKE_CASE_LOCALS
+    severity: warning
+    applies_to:
+      languages: [typescript, javascript]
+      paths:
+        include: ["apps/**"]
+    match:
+      class: "ident"
+      text.regex: "_[a-z]"
+    unless:
+      adr.exists:
+        topic: "snake-case naming exception"
+    message: "Use camelCase for identifiers."

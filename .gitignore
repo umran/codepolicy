@@ -1,4 +1,4 @@
-# Rust build artifacts (Cargo workspace lives in codepolicy/)
+# Rust build artifacts (Cargo workspace lives in tyrant/)
 target/
 **/*.rs.bk
 

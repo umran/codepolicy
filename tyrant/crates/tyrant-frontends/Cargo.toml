@@ -1,0 +1,20 @@
+[package]
+name = "tyrant-frontends"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Language frontends that lex source into token streams for tyrant"
+
+[dependencies]
+tyrant-token.workspace = true
+anyhow.workspace = true
+camino.workspace = true
+serde_json.workspace = true
+tree-sitter.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-javascript.workspace = true

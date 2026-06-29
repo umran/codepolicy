@@ -1,0 +1,35 @@
+# tyrant starter pack — Cobra-style lexeme rules.
+# Rules match over the lexer's token stream. See the README for the grammar.
+
+rule NO_DEBUGGER (error) {
+  lang typescript, javascript
+  match debugger
+  message "Remove debugger statements before committing."
+}
+
+rule NO_CONSOLE (warning) {
+  lang typescript, javascript
+  in "apps/**", "packages/**"
+  match console
+  message "Use the logger instead of console.*"
+}
+
+rule NO_LOOSE_EQUALITY (warning) {
+  lang typescript, javascript
+  match "=="
+  message "Use === instead of ==."
+}
+
+rule TODO_NEEDS_ISSUE (warning) {
+  lang typescript, javascript
+  match @comment & /\bTODO\b/ & ^/(#\d+|[A-Z][A-Z0-9]+-\d+|https?:\/\/)/
+  message "Add an issue reference to this TODO, e.g. TODO(#123) or TODO(PROJ-45)."
+}
+
+rule NO_SNAKE_CASE_LOCALS (warning) {
+  lang typescript, javascript
+  in "apps/**"
+  match @ident & /_[a-z]/
+  unless adr "snake-case naming exception"
+  message "Use camelCase for identifiers."
+}

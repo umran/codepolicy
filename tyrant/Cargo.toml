@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "A Cobra-style lexeme policy engine for enforcing custom rules over a codebase"
+repository = "https://github.com/umran/tyrant"
+homepage = "https://github.com/umran/tyrant"
+authors = ["Umran Hussain <umran.hussein@gmail.com>"]
+keywords = ["linter", "static-analysis", "policy", "lint", "code-quality"]
+categories = ["development-tools"]
+
+[workspace.dependencies]
+# Internal crates. The `version` is required so the crates resolve from
+# crates.io once published; the `path` is used for local workspace builds.
+tyrant-token = { path = "crates/tyrant-token", version = "0.1.0" }
+tyrant-frontends = { path = "crates/tyrant-frontends", version = "0.1.0" }
+tyrant-rules = { path = "crates/tyrant-rules", version = "0.1.0" }
+tyrant-match = { path = "crates/tyrant-match", version = "0.1.0" }
+tyrant-report = { path = "crates/tyrant-report", version = "0.1.0" }
+tyrant-core = { path = "crates/tyrant-core", version = "0.1.0" }
+
+# External crates (versions per proposal §10.5, corrected)
+anyhow = "1"
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+serde_yaml_ng = "0.9"               # maintained fork; upstream serde_yaml was deprecated in 2024
+camino = { version = "1", features = ["serde1"] }
+ignore = "0.4"
+globset = "0.4"
+regex = "1"
+rayon = "1"
+tree-sitter = "0.26"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.25"
