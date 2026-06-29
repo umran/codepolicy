@@ -68,10 +68,11 @@ Rules compile to matchers over the token stream:
 - **Single match** — a literal lexeme (`debugger`, `"=="`), `@class`, `/regex/`,
   or `^/regex/` (negation) — one lexeme whose text/class satisfy the pattern.
 - **Sequence** — an ordered run of token patterns with quantifiers (`? * +`),
-  negation, alternation, the `any` wildcard, and captures/backreferences. The
+  negation, alternation, the `any`/`.` wildcard, and captures/backreferences. The
   matcher tries every start position and is end-anchored over its region, so a
-  trailing `not X *` means "no `X` in the rest of the region." `in scope`
-  restricts the region to a `{}` block, resolved via the `jmp` links.
+  trailing `not X *` means "no `X` in the rest of the region." Explicit `( )` /
+  `{ }` / `[ ]` steps balance against their `jmp` partner, so a wildcard cannot
+  escape the pair. `in scope` restricts the region to a `{}` block.
 - **Scope predicates** — `where scope contains/not contains/followed by` over the
   matched lexeme's enclosing `{}` block.
 - **Composition / counting** — `compose` (set algebra) and `count` (cardinality)
@@ -79,9 +80,10 @@ Rules compile to matchers over the token stream:
 
 The surface is Cobra's token-pattern syntax directly: a bare word is a literal
 lexeme (`for`), `/^pumba/` a text regex, `@ident` a class, `@ident & /^pumba/` a
-conjunction, `.`/`any` the wildcard, `* +` step repetition, and `x:@ident … :x`
-a binding and backreference. A raw `Token[field op v]` form remains for lexeme
-fields with no surface syntax (`curly_depth`, `text_len`).
+conjunction, `.`/`any` the wildcard, `* +` step repetition, `[ a b ]` / `( a | b )`
+a set/choice, `^X` negation, and `x:@ident … :x` a binding and backreference. A
+raw `Token[field op v]` form remains for lexeme fields with no surface syntax
+(`curly_depth`, `text_len`).
 
 ## 4. Frontends
 

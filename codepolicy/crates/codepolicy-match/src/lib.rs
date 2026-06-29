@@ -8,7 +8,8 @@ use camino::Utf8PathBuf;
 use codepolicy_token::{Interner, Span, Token, TokenRef, TokenStream, NO_JMP};
 use codepolicy_rules::{
     AttrPred, Bindings, ClauseMatcher, CompiledCompose, CompiledCount, CompiledRule,
-    CompiledSequence, CompiledWhereScope, CountScope, KeyPart, Quant, Severity, SetOp,
+    CompiledSequence, CompiledStep, CompiledWhereScope, CountScope, KeyPart, Quant, Severity,
+    SetOp, StepMatcher,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
@@ -331,73 +332,164 @@ fn where_scope_holds(ws: &CompiledWhereScope, refs: &[TokenRef], target_idx: usi
     true
 }
 
+/// Region-relative matching-delimiter partner for each token: for each `(`/`{`/`[`
+/// and its closer, the index (within `region`) of the paired delimiter. `None`
+/// for non-delimiters and unpaired brackets. Mirrors the lexer's `jmp` links but
+/// resolved locally so indices line up with `region`.
+fn delimiter_partners(region: &[TokenRef]) -> Vec<Option<usize>> {
+    let mut partners = vec![None; region.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    for (k, r) in region.iter().enumerate() {
+        let kind = r.interner.resolve(r.token.kind);
+        match kind {
+            "(" | "{" | "[" => stack.push(k),
+            ")" | "}" | "]" => {
+                let want = match kind {
+                    ")" => "(",
+                    "}" => "{",
+                    _ => "[",
+                };
+                if let Some(&top) = stack.last() {
+                    if r.interner.resolve(region[top].token.kind) == want {
+                        stack.pop();
+                        partners[top] = Some(k);
+                        partners[k] = Some(top);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    partners
+}
+
+/// Whether a step is a positive literal match on a single `(`/`)`/`{`/`}`/`[`/`]`
+/// — i.e. an explicit delimiter the matcher should balance against its partner.
+fn step_is_delim_literal(step: &CompiledStep) -> bool {
+    if step.negate {
+        return false;
+    }
+    match &step.matcher {
+        StepMatcher::Pat(preds) => {
+            preds.len() == 1
+                && matches!(&preds[0],
+                    AttrPred::Eq { attr, value }
+                        if attr == "text"
+                            && matches!(value.as_str(), "(" | ")" | "{" | "}" | "[" | "]"))
+        }
+        StepMatcher::Alt(_) => false,
+    }
+}
+
 /// Every anchor index (within `region`) at which the sequence matches. A match
 /// must consume the whole region from its start position onward (end-anchored),
 /// so a trailing negated run means "none in the rest of the scope". Matching is
 /// attempted from each position; every distinct occurrence is reported.
 fn match_sequence(seq: &CompiledSequence, region: &[TokenRef]) -> Vec<usize> {
+    let partners = delimiter_partners(region);
+    let has_delims = seq.steps.iter().any(step_is_delim_literal);
+    // The (si, ei) memo is only sound when neither captures nor a delimiter stack
+    // make the result depend on more than the step/position pair.
+    let memo = !seq.has_captures && !has_delims;
     let mut failed: HashSet<(usize, usize)> = HashSet::new();
-    let no_caps = !seq.has_captures;
     let mut anchors = Vec::new();
     for p in 0..region.len() {
-        if match_here(&seq.steps, 0, region, p, &Bindings::new(), no_caps, &mut failed) {
+        if match_here(&seq.steps, 0, region, p, &Bindings::new(), memo, &partners, &[], &mut failed)
+        {
             anchors.push(p);
         }
     }
     anchors
 }
 
-/// Whether `steps[si..]` can consume `region[ei..]` exactly to the end.
+/// Whether `steps[si..]` can consume `region[ei..]` exactly to the end. `stack`
+/// holds the partner positions of explicit opening delimiters matched but not yet
+/// closed; a wildcard may not advance past the innermost one (`barrier`), and an
+/// explicit closing delimiter must land on it — so `( .* )` stays inside its pair.
+#[allow(clippy::too_many_arguments)]
 fn match_here(
-    steps: &[codepolicy_rules::CompiledStep],
+    steps: &[CompiledStep],
     si: usize,
     region: &[TokenRef],
     ei: usize,
     binds: &Bindings,
-    no_caps: bool,
+    memo: bool,
+    partners: &[Option<usize>],
+    stack: &[usize],
     failed: &mut HashSet<(usize, usize)>,
 ) -> bool {
     if si == steps.len() {
         return ei == region.len();
     }
-    if no_caps && failed.contains(&(si, ei)) {
+    if memo && failed.contains(&(si, ei)) {
         return false;
     }
 
     let step = &steps[si];
+    // Wildcards/repeats cannot cross the innermost open delimiter's partner.
+    let barrier = stack.last().copied().unwrap_or(region.len());
 
     let result = (|| {
         match step.quant {
             Quant::One => {
                 if ei < region.len() && step.accepts(&region[ei], binds) {
                     let b2 = step.apply_bind(&region[ei], binds);
-                    return match_here(steps, si + 1, region, ei + 1, &b2, no_caps, failed);
+                    if step_is_delim_literal(step) {
+                        match partners.get(ei).copied().flatten() {
+                            // Opening delimiter: push its partner as the new barrier.
+                            Some(p) if p > ei => {
+                                let mut st = stack.to_vec();
+                                st.push(p);
+                                return match_here(
+                                    steps, si + 1, region, ei + 1, &b2, memo, partners, &st, failed,
+                                );
+                            }
+                            // Closing delimiter: must be the innermost open's partner.
+                            Some(p) if p < ei => {
+                                if let Some(&top) = stack.last() {
+                                    if top != ei {
+                                        return false;
+                                    }
+                                    let st = &stack[..stack.len() - 1];
+                                    return match_here(
+                                        steps, si + 1, region, ei + 1, &b2, memo, partners, st,
+                                        failed,
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    return match_here(
+                        steps, si + 1, region, ei + 1, &b2, memo, partners, stack, failed,
+                    );
                 }
                 false
             }
             Quant::Optional => {
-                if ei < region.len() && step.accepts(&region[ei], binds) {
+                if ei < barrier && step.accepts(&region[ei], binds) {
                     let b2 = step.apply_bind(&region[ei], binds);
-                    if match_here(steps, si + 1, region, ei + 1, &b2, no_caps, failed) {
+                    if match_here(steps, si + 1, region, ei + 1, &b2, memo, partners, stack, failed)
+                    {
                         return true;
                     }
                 }
-                match_here(steps, si + 1, region, ei, binds, no_caps, failed)
+                match_here(steps, si + 1, region, ei, binds, memo, partners, stack, failed)
             }
             Quant::ZeroOrMore => {
-                if match_here(steps, si + 1, region, ei, binds, no_caps, failed) {
+                if match_here(steps, si + 1, region, ei, binds, memo, partners, stack, failed) {
                     return true;
                 }
-                if ei < region.len() && step.accepts(&region[ei], binds) {
+                if ei < barrier && step.accepts(&region[ei], binds) {
                     let b2 = step.apply_bind(&region[ei], binds);
-                    return match_here(steps, si, region, ei + 1, &b2, no_caps, failed);
+                    return match_here(steps, si, region, ei + 1, &b2, memo, partners, stack, failed);
                 }
                 false
             }
         }
     })();
 
-    if !result && no_caps {
+    if !result && memo {
         failed.insert((si, ei));
     }
     result

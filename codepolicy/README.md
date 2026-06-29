@@ -42,12 +42,12 @@ matching body:
 
 ```
 # a comment runs to end of line, anywhere
-rule no_debugger (error) {     # severity is (error) or (warning); default is error
-  lang typescript, javascript  # optional; omit to apply to all languages
-  in  "src/**"                 # optional include globs (a file must match one)
-  not in "**/*.test.ts"        # optional exclude globs (excludes win)
-  match debugger
-  message "Remove debugger statements."
+rule no_explicit_any (warning) { # severity is (error) or (warning); default is error
+  lang typescript, javascript    # optional; omit to apply to all languages
+  in  "src/**"                   # optional include globs (a file must match one)
+  not in "**/*.test.ts"          # optional exclude globs (excludes win)
+  match "any"
+  message "Avoid the `any` type; use a precise type or `unknown`."
 }
 ```
 
@@ -67,18 +67,19 @@ rule no_debugger (error) {     # severity is (error) or (warning); default is er
 A `match` body names one token pattern, written in Cobra's token syntax:
 
 ```
-match debugger                     # a literal lexeme, matched by its text
-match "=="                         # quote operators and punctuation
+match var                          # a literal lexeme (the `var` keyword)
+match "=="                         # quote operators and punctuation (loose equality)
 match @ident                       # a token class: any identifier
-match @ident & /^_/                # an identifier whose text starts with _
-match /^use[A-Z]/                  # any lexeme whose text matches the regex
-match @comment & /FIXME/           # a comment mentioning FIXME
-match @comment & ^/\(#\d+\)/       # a comment whose text does NOT match the regex
+match @ident & /^_/                # an identifier whose name starts with `_`
+match /^use[A-Z]/                  # a React-hook identifier: useState, useMemo, …
+match @comment & /@ts-ignore/      # a // @ts-ignore suppression comment
+match @comment & /TODO/ & ^/\(#\d+\)/   # a TODO with no (#123) issue reference
 ```
 
-- A **bare word** (`debugger`, `lock`, `console`) matches a lexeme by its exact
-  text — you name a keyword, identifier, or property the way it appears in the
-  source. Quote operators and punctuation: `"=="`, `"=>"`, `"{"`.
+- A **bare word** (`var`, `console`, `addEventListener`) matches a lexeme by its
+  exact text — you name a keyword, identifier, or property the way it appears in
+  the source. Quote operators and punctuation: `"=="`, `"=>"`, `"{"`. (Quote `"any"`
+  too: bare `any` is the wildcard below.)
 - **`@class`** matches the normalized, language-neutral class the frontend
   assigns — `@ident`, `@prop`, `@str`, `@num`, `@bool`, `@regex`, `@comment`,
   `@symbol` — so `@ident` means "identifier" in any language with a frontend.
@@ -87,7 +88,8 @@ match @comment & ^/\(#\d+\)/       # a comment whose text does NOT match the reg
   comments included — conjoin a `@class` to narrow it.
 - **`&`** conjoins atoms on a *single* lexeme: `@ident & /^_/` is one lexeme that
   is both an identifier and starts with `_`.
-- **`any`** matches one lexeme of any kind (the sequence wildcard, below).
+- **`any`** (or Cobra's **`.`**) matches one lexeme of any kind (the sequence
+  wildcard, below).
 
 There is no `statement_block` or `call_expression` lexeme — those are composite
 constructs, not lexemes. Match a block by its `{`, a call by the callee lexeme
@@ -104,38 +106,52 @@ without it the region is the whole file.
 
 ```
 sequence in scope {
-  validate
-  any *                         # quantifiers: ? (0–1), * (0+), + (1+)
-  ( save | commit )             # alternation
+  fetch                         # a fetch(...) call
+  any *                         # any run of lexemes  (quantifiers: ? 0–1, * 0+, + 1+)
+  ( then | catch )              # followed by .then or .catch  (or [ then catch ])
+  any *                         # ... and the rest of the block (matching is end-anchored)
 }
 ```
 
-- `any` matches one lexeme of any kind; `any *` soaks the rest of a region.
-- A bare `not X` consumes exactly one lexeme that must not match `X`; `not X *`
-  consumes a run of non-`X` lexemes.
+This matches a `fetch(...)` followed by a `.then`/`.catch` in the same block. The
+trailing `any *` is needed because a sequence must consume its region to the end.
+
+- `any` (or `.`) matches one lexeme of any kind; `any *` (or `.*`) soaks the rest
+  of a region.
+- Alternation is `( a | b )` or Cobra's space-separated set `[ a b ]`.
+- `not X` (or Cobra's `^X`) consumes exactly one lexeme that must not match `X`;
+  `not X *` consumes a run of non-`X` lexemes.
+- **Delimiters balance.** When `( )`, `{ }`, or `[ ]` appear as explicit steps,
+  each pairs with its matching partner (via the lexer's links), so a wildcard
+  between them cannot run past the close: `for "(" any * ")"` matches a `for`'s own
+  parentheses, not some later `)`.
 - Because matching is end-anchored, a trailing `not X *` means "no `X` in the rest
-  of the region" — the acquire-without-release idiom:
+  of the region" — the use-without-cleanup idiom:
 
 ```
-rule lock_without_unlock (error) {
+rule listener_without_cleanup (warning) {
   sequence in scope {
-    lock
-    not unlock *
+    addEventListener
+    not removeEventListener *
   }
-  message "lock() with no unlock() in the same block."
+  message "addEventListener with no removeEventListener in the same block."
 }
 ```
 
 **Captures** correlate two lexemes by text, exactly as in Cobra. `x:@ident` binds
 the matched lexeme's text to `x`; a later `:x` is a backreference — the same text
-again:
+again. This flags a self-assignment, `x = x;`:
 
 ```
-sequence {
-  x:@ident       # bind the identifier's text to x
-  any *
-  :x             # the same identifier again
-  any *
+rule no_self_assign (warning) {
+  sequence in scope {
+    x:@ident       # bind the identifier's text to x
+    "="
+    :x             # the same identifier on the right
+    ";"
+    any *          # absorb the rest of the block (matching is end-anchored)
+  }
+  message "Self-assignment has no effect."
 }
 ```
 
@@ -148,10 +164,10 @@ A `match` rule can ask about the lexeme's enclosing `{}` block without a full
 sequence:
 
 ```
-rule debugger_in_returning_block (warning) {
-  match debugger
+rule console_in_returning_block (warning) {
+  match console
   where scope contains return
-  message "A debugger in a block that returns."
+  message "A console.* left in a block that returns a value."
 }
 ```
 
@@ -165,17 +181,17 @@ A rule can be derived from other rules in a pass that runs after the matching
 rules have produced their violations:
 
 ```
-rule uses_fetch (warning) { match fetch }
-rule has_debugger (warning) { match debugger }
+rule uses_console (warning) { match console }
+rule loose_equality (warning) { match "==" }
 
-rule fetch_with_debugger (error) {
-  compose intersection of uses_fetch, has_debugger by file, function
-  message "A function that calls fetch still has a debugger."
+rule sloppy_function (error) {
+  compose intersection of uses_console, loose_equality by file, function
+  message "A function that uses console.* and loose equality."
 }
 
-rule too_many_debuggers (error) {
-  count has_debugger per function > 1
-  message "More than one debugger in a function."
+rule too_many_console (error) {
+  count uses_console per function > 1
+  message "More than one console.* call in a function."
 }
 ```
 
@@ -192,11 +208,11 @@ function` over bare `by function` (a function name is only unique within a file)
 A rule can exempt cases inline:
 
 ```
-rule no_debugger (error) {
-  match debugger
+rule no_console (warning) {
+  match console
   unless path "**/scripts/**"   # by glob
-  unless adr "debugging-tools"  # an accepted decision record (repo-wide)
-  message "Remove debugger statements."
+  unless adr "logging-in-cli"   # an accepted decision record (repo-wide)
+  message "Use the logger instead of console.*"
   unless waiver                 # a file-scoped waiver under this rule's id
 }
 ```
@@ -221,7 +237,7 @@ codepolicy check                           # check the current repo
 codepolicy check src/ --format agent       # check a subtree, agent output
 codepolicy check --rules my.rules --format json
 codepolicy tokens path/to/File             # dump a file's lexeme stream
-codepolicy explain-rule no_debugger        # show how a rule compiles
+codepolicy explain-rule no_explicit_any    # show how a rule compiles
 ```
 
 `check` discovers a `codepolicy.rules` or `codepolicy.yaml` at the root, or takes

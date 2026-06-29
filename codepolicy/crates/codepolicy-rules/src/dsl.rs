@@ -13,11 +13,16 @@
 //! Token patterns (the Cobra surface):
 //!   `debugger` / `"=="`   a literal lexeme, matched by its text (quote operators)
 //!   `@class`              a token class (`@ident`, `@str`, `@comment`, …)
-//!   `/re/`                a lexeme whose text matches the regex
-//!   `^/re/`               a lexeme whose text does NOT match the regex
+//!   `/re/` / `^/re/`      a lexeme whose text does (does not) match the regex
 //!   `@ident & /^_/`       conjunction of atoms on one lexeme
-//!   `any`                 any one lexeme (the sequence wildcard)
+//!   `any` / `.`           any one lexeme; `any *` / `.*` is a run of them
+//!   `( a | b )` / `[a b]` alternation, or Cobra's space-separated bracketed set
+//!   `not X` / `^X`        step negation — one lexeme that does not match X
 //!   `x:@ident` … `:x`     bind a lexeme's text to `x`, then match the same text
+//!
+//! In a sequence, explicit delimiters balance: `( … )`, `{ … }`, `[ … ]` match a
+//! paired interval (via the lexer's `jmp` links), so a wildcard inside cannot run
+//! past the matching delimiter.
 //!
 //! Bodies: `match <pat> [where scope <clause>]*`, `sequence [in scope] { <step>+ }`,
 //! `compose <op> of A, B [by file, function]`, `count RULE per file > N`.
@@ -81,6 +86,8 @@ enum Tok {
     LParen,
     RParen,
     Comma,
+    /// `.` — Cobra's any-token wildcard (synonym for `any`).
+    Dot,
     Eq,
     EqEq,
     Ne,
@@ -152,6 +159,12 @@ fn lex(src: &str) -> R<Vec<(Tok, usize)>> {
             }
             ',' => {
                 push(&mut out, Tok::Comma);
+                i += 1;
+            }
+            // A standalone `.` is the any-token wildcard. (`1.5`-style numbers are
+            // lexed digit-first, below, so they never reach here.)
+            '.' => {
+                push(&mut out, Tok::Dot);
                 i += 1;
             }
             '|' => {
@@ -588,7 +601,8 @@ impl Parser {
     /// A token pattern: `any` (the wildcard), a chain of token atoms joined by `&`,
     /// or the raw `Token[ pred, ... ]` field form.
     fn parse_pattern(&mut self) -> R<Attrs> {
-        if self.at_kw("any") {
+        // `any` or Cobra's `.` — the wildcard (matches any one lexeme).
+        if self.at_kw("any") || self.peek() == Some(&Tok::Dot) {
             self.bump();
             return Ok(BTreeMap::new());
         }
@@ -740,7 +754,8 @@ impl Parser {
     }
 
     fn parse_step(&mut self) -> R<RawStep> {
-        let negate = if self.at_kw("not") {
+        // Step negation: `not <pat>` or Cobra's `^<pat>` (absence of the token).
+        let negate = if self.at_kw("not") || self.peek() == Some(&Tok::Caret) {
             self.bump();
             true
         } else {
@@ -779,6 +794,25 @@ impl Parser {
                 }
             }
             self.expect(&Tok::RParen)?;
+            (BTreeMap::new(), Some(alts))
+        } else if self.peek() == Some(&Tok::LBrack) {
+            // Cobra bracketed set: `[a b c]` — choice over space-separated atoms.
+            self.bump();
+            let mut alts: Vec<Vec<RawStep>> = Vec::new();
+            while self.peek() != Some(&Tok::RBrack) {
+                if self.peek().is_none() {
+                    return Err(self.err("unterminated `[ ... ]` set"));
+                }
+                let a = self.parse_pattern()?;
+                alts.push(vec![RawStep {
+                    attrs: a,
+                    quant: None,
+                    negate: None,
+                    bind: None,
+                    alt: None,
+                }]);
+            }
+            self.expect(&Tok::RBrack)?;
             (BTreeMap::new(), Some(alts))
         } else {
             (self.parse_pattern()?, None)
@@ -1014,6 +1048,27 @@ mod tests {
             "bare /re/ -> text ~ /re/: {:?}",
             r.preds
         );
+    }
+
+    #[test]
+    fn cobra_spellings_dot_caret_bracket_set() {
+        // `.`/`.*` (any), `^X` (step negation), `[a b]` (bracketed set) parse.
+        let src = r#"
+            rule cobra (warning) {
+              sequence { foo  .  *  [ bar baz ]  ^qux }
+              message "x"
+            }
+        "#;
+        let (rules, _) = load(src).unwrap();
+        let seq = rules[0].sequence.as_ref().unwrap();
+        // foo, (. *), alt[bar baz], (^qux)
+        assert_eq!(seq.steps.len(), 4);
+        assert_eq!(seq.steps[1].quant, crate::Quant::ZeroOrMore, "`. *` is a wildcard run");
+        assert!(
+            matches!(seq.steps[2].matcher, super::super::StepMatcher::Alt(_)),
+            "`[bar baz]` is an alternation"
+        );
+        assert!(seq.steps[3].negate, "`^qux` is a negated step");
     }
 
     #[test]
