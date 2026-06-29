@@ -12,6 +12,33 @@ The model follows NASA/JPL's Cobra: a flat stream of lexical tokens, matched by
 patterns, never raw text — so a rule for the identifier `x` matches the lexeme
 `x`, not the `x` inside `"prefix"` or a comment.
 
+## Why now
+
+Pattern-based static analysis over a token stream — Cobra's model — never
+displaced general-purpose linters and code review on most teams. Bespoke
+structural rules cost more to write and maintain than they return when humans
+produce code at human speed: the invariants worth enforcing are few, and review
+catches the rest.
+
+LLM-generated code changes that arithmetic:
+
+- **Volume outruns review.** A model emits more code than anyone reads closely. A
+  deterministic check costs almost nothing per file and scales with output;
+  human attention does not.
+- **Generation is probabilistic; a rule is not.** A model can break a
+  project-specific invariant fluently and plausibly. A pattern either matches or
+  it doesn't, independent of model or prompt — turning "the model usually does X"
+  into "X holds, or the run fails."
+- **The authoring cost collapses.** Writing a rule from a described invariant is
+  exactly what a model is good at, and the rule is then a small, inspectable,
+  version-controlled artifact — not a prompt you hope was honored.
+
+The leverage is largest for the invariants no off-the-shelf tool encodes, the
+ones specific to your codebase: "this call only inside that module," "every
+subscription is torn down in the same block." The `agent` output format closes
+the loop — each violation is machine-readable (`rule`, `file:line`, fix message),
+so an agent can correct its own output before a human sees it.
+
 ## How it sees code
 
 A frontend lexes each file into a flat, ordered **token stream**: one entry per
