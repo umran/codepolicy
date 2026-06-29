@@ -292,15 +292,16 @@ pub trait Frontend: Sync {
 ```
 
 The bundled frontend is `ts_js.rs` (TypeScript/JavaScript via tree-sitter). To
-add a language, implement the trait under `codepolicy-frontends/src/`, register
-it in `frontends()`, and add a fixture and assertion in
-`crates/codepolicy-cli/tests/fixtures.rs`. Use 1-based, end-exclusive spans, link
+add a language, implement the trait under
+`codepolicy/crates/codepolicy-frontends/src/`, register it in `frontends()`, and
+add a fixture and assertion in
+`codepolicy/crates/codepolicy-cli/tests/fixtures.rs`. Use 1-based, end-exclusive spans, link
 matching delimiters (`{`/`}`/`(`/`)`/`[`/`]`) via `jmp`, and assign each lexeme a
 normalized `class` so `@class` rules apply unchanged.
 
 ## Architecture
 
-A Cargo workspace:
+A Cargo workspace under `codepolicy/`:
 
 | Crate                  | Responsibility                                                       |
 | ---------------------- | ------------------------------------------------------------------- |
@@ -315,9 +316,10 @@ A Cargo workspace:
 ## Build and test
 
 ```bash
+cd codepolicy                 # the Cargo workspace lives here
 cargo build --release         # binary at target/release/codepolicy
 cargo test                    # unit + end-to-end fixture tests
 cargo clippy --all-targets
 ```
 
-Design rationale: [`../proposal.md`](../proposal.md).
+Design rationale: [`proposal.md`](proposal.md).

@@ -5,7 +5,7 @@ Cobra. You write rules — declarative patterns over a file's **lexemes** — an
 reports every match with `file:line` evidence. It has no built-in opinion about
 good code; it enforces the rules you write.
 
-This document is the design rationale. The [README](codepolicy/README.md) is the
+This document is the design rationale. The [README](README.md) is the
 authoritative user reference for the grammar and CLI.
 
 > Earlier drafts of this project carried a second "canonical event" layer (a
