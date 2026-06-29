@@ -54,7 +54,7 @@ fn token_single_match() {
     // The `switch` keyword lexeme — a construct the grammar names, matched by text.
     let v = check(
         "token_repo",
-        r#"rule NO_SWITCH (warning) { match Token[node_kind = "switch"] message "x" }"#,
+        r#"rule NO_SWITCH (warning) { match switch message "x" }"#,
     );
     assert_eq!(v.len(), 1, "{v:#?}");
     assert_eq!(v[0].rule_id, "NO_SWITCH");
@@ -66,7 +66,7 @@ fn exact_lexeme_and_bare_regex() {
     let v = check(
         "token_repo",
         r#"
-rule EXACT (warning) { match Token[text = "switch"] message "x" }
+rule EXACT (warning) { match switch message "x" }
 rule REGEX (warning) { match /^sw/ message "x" }
 "#,
     );
@@ -93,9 +93,9 @@ fn token_sequence_in_scope() {
         r#"
 rule TWO_DEBUGGERS (warning) {
   sequence in scope {
-    Token[node_kind = "debugger"]
+    debugger
     any *
-    Token[node_kind = "debugger"]
+    debugger
     any *
   }
   message "x"
@@ -113,8 +113,8 @@ fn token_where_scope() {
         "tokrel_repo",
         r#"
 rule DBG_IN_RETURNING (warning) {
-  match Token[node_kind = "debugger"]
-  where scope contains Token[node_kind = "return"]
+  match debugger
+  where scope contains return
   message "x"
 }
 "#,
@@ -131,9 +131,9 @@ fn token_backreference() {
         r#"
 rule REPEAT (warning) {
   sequence {
-    Token[class = "ident"] as n = text
+    n:@ident
     any *
-    Token[class = "ident", text == $n]
+    :n
     any *
   }
   message "x"
@@ -149,7 +149,7 @@ fn aggregation_by_function_over_a_token_rule() {
     let v = check(
         "tokrel_repo",
         r#"
-rule dbg (warning) { match Token[node_kind = "debugger"] }
+rule dbg (warning) { match debugger }
 rule TOO_MANY (error) {
   count dbg per function > 1
   message "x"
@@ -167,8 +167,8 @@ fn compose_combines_two_lexeme_rules_by_function() {
     let v = check(
         "tokrel_repo",
         r#"
-rule HAS_DEBUGGER (warning) { match Token[node_kind = "debugger"] }
-rule HAS_RETURN (warning) { match Token[node_kind = "return"] }
+rule HAS_DEBUGGER (warning) { match debugger }
+rule HAS_RETURN (warning) { match return }
 rule BOTH (error) {
   compose intersection of HAS_DEBUGGER, HAS_RETURN by function
   message "x"

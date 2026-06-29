@@ -563,7 +563,7 @@ mod tests {
 
     #[test]
     fn single_token_match() {
-        let (rules, _) = dsl::load(r#"rule D (error) { match Token[node_kind = "debugger"] }"#).unwrap();
+        let (rules, _) = dsl::load(r#"rule D (error) { match debugger }"#).unwrap();
         let ts = stream(
             "a.ts",
             &[("debugger", "symbol", "debugger", "f", 0), ("identifier", "ident", "x", "f", 10)],
@@ -580,9 +580,9 @@ mod tests {
         let src = r#"
             rule REPEAT (warning) {
               sequence {
-                Token[class = "ident"] as n = text
+                n:@ident
                 any *
-                Token[class = "ident", text == $n]
+                :n
                 any *
               }
             }
@@ -604,8 +604,8 @@ mod tests {
     #[test]
     fn compose_intersection_by_function() {
         let src = r#"
-            rule A (warning) { match Token[text = "acquire"] }
-            rule B (warning) { match Token[text = "risky"] }
+            rule A (warning) { match acquire }
+            rule B (warning) { match risky }
             rule BOTH (error) { compose intersection of A, B by file, function }
         "#;
         let (rules, _) = dsl::load(src).unwrap();
@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn count_per_file_threshold() {
         let src = r#"
-            rule DBG (warning) { match Token[node_kind = "debugger"] }
+            rule DBG (warning) { match debugger }
             rule TOO_MANY (error) { count DBG per file > 2 message "too many" }
         "#;
         let (rules, _) = dsl::load(src).unwrap();

@@ -11,7 +11,7 @@ rules:
     applies_to:
       languages: [typescript, javascript]
     match:
-      node_kind: "debugger"
+      text: "debugger"
     message: "Remove debugger statements before committing."
 
   - id: NO_CONSOLE
@@ -21,7 +21,6 @@ rules:
       paths:
         include: ["apps/**", "packages/**"]
     match:
-      node_kind: "identifier"
       text: "console"
     message: "Use the logger instead of console.*"
 
@@ -30,7 +29,7 @@ rules:
     applies_to:
       languages: [typescript, javascript]
     match:
-      node_kind: "=="
+      text: "=="
     message: "Use === instead of ==."
 
   - id: TODO_NEEDS_ISSUE
@@ -42,3 +41,17 @@ rules:
       text.regex: "\\bTODO\\b"
       text.not.regex: "(#\\d+|[A-Z][A-Z0-9]+-\\d+|https?://)"
     message: "Add an issue reference to this TODO, e.g. TODO(#123) or TODO(PROJ-45)."
+
+  - id: NO_SNAKE_CASE_LOCALS
+    severity: warning
+    applies_to:
+      languages: [typescript, javascript]
+      paths:
+        include: ["apps/**"]
+    match:
+      class: "ident"
+      text.regex: "_[a-z]"
+    unless:
+      adr.exists:
+        topic: "snake-case naming exception"
+    message: "Use camelCase for identifiers."

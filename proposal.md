@@ -65,9 +65,8 @@ assigns (`ident`, `prop`, `str`, `num`, `bool`, `regex`, `comment`, `symbol`).
 
 Rules compile to matchers over the token stream:
 
-- **Single match** — `match Token[…]`, `@class`, `/regex/`, exact text — a token
-  whose fields satisfy a set of predicates (equality, regex, membership, numeric
-  comparison).
+- **Single match** — a literal lexeme (`debugger`, `"=="`), `@class`, `/regex/`,
+  or `^/regex/` (negation) — one lexeme whose text/class satisfy the pattern.
 - **Sequence** — an ordered run of token patterns with quantifiers (`? * +`),
   negation, alternation, the `any` wildcard, and captures/backreferences. The
   matcher tries every start position and is end-anchored over its region, so a
@@ -78,10 +77,11 @@ Rules compile to matchers over the token stream:
 - **Composition / counting** — `compose` (set algebra) and `count` (cardinality)
   run as a post-pass over other rules' violations, keyed by file and/or function.
 
-Cobra's token-pattern syntax maps one-to-one: `for` → `Token[text="for"]`,
-`/^pumba/` → a text regex, `@ident` → a class, `@ident & /^pumba/` →
-conjunction, `.` → `any`, `* +` → step repetition, `x:@ident … @x` → `as x =
-text … text == $x`.
+The surface is Cobra's token-pattern syntax directly: a bare word is a literal
+lexeme (`for`), `/^pumba/` a text regex, `@ident` a class, `@ident & /^pumba/` a
+conjunction, `.`/`any` the wildcard, `* +` step repetition, and `x:@ident … :x`
+a binding and backreference. A raw `Token[field op v]` form remains for lexeme
+fields with no surface syntax (`curly_depth`, `text_len`).
 
 ## 4. Frontends
 

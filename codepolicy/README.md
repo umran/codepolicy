@@ -46,7 +46,7 @@ rule no_debugger (error) {     # severity is (error) or (warning); default is er
   lang typescript, javascript  # optional; omit to apply to all languages
   in  "src/**"                 # optional include globs (a file must match one)
   not in "**/*.test.ts"        # optional exclude globs (excludes win)
-  match Token[node_kind = "debugger"]
+  match debugger
   message "Remove debugger statements."
 }
 ```
@@ -62,61 +62,38 @@ rule no_debugger (error) {     # severity is (error) or (warning); default is er
   match the path relative to the checked directory; `*` crosses `/`, so anchor
   with `**/dir/**` or `dir/**`. Scope is per-rule.
 
-The predicate operators inside `Token[ … ]` (all ANDed):
-
-| Predicate                   | Holds when                                          |
-| --------------------------- | --------------------------------------------------- |
-| `field = "v"` / `field = 5` | a value equals `v` (equality coerces string ↔ number) |
-| `field ~ /re/`              | a value matches the regex                           |
-| `field !~ /re/`             | no value matches the regex                          |
-| `field in ["a", "b"]`       | a value is in the set                               |
-| `field > 5` (`< >= <=`)     | a numeric value compares true                       |
-| `field == $v` / `field != $v` | equals / differs from a captured variable (sequences) |
-
-A predicate on a field a token doesn't carry never matches — confirm names with
-`codepolicy tokens` first.
-
 ## Matching a lexeme
 
-Cobra's token syntax is supported directly. Match a lexeme by **class**, by
-**exact** text, by a **regex** over its text, or by explicit fields; conjoin
-constraints on one token with `&`:
+A `match` body names one token pattern, written in Cobra's token syntax:
 
 ```
-match @ident                       # any identifier
-match @ident & /^pumba/            # an identifier whose name starts with pumba
-match /^use/                       # any lexeme whose text matches the regex
-match Token[text = "switch"]       # the exact `switch` lexeme
-match Token[node_kind = "=="]      # an operator lexeme
-match Token[node_kind = "identifier", text ~ /_/]      # snake_case identifiers
-match Token[node_kind = "string", text_len > 80]       # a long string literal
-match Token[class = "comment", text ~ /FIXME/]         # a comment mentioning FIXME
-match Token[node_kind = "{", curly_depth > 2]          # a brace nested past 2 blocks
+match debugger                     # a literal lexeme, matched by its text
+match "=="                         # quote operators and punctuation
+match @ident                       # a token class: any identifier
+match @ident & /^_/                # an identifier whose text starts with _
+match /^use[A-Z]/                  # any lexeme whose text matches the regex
+match @comment & /FIXME/           # a comment mentioning FIXME
+match @comment & ^/\(#\d+\)/       # a comment whose text does NOT match the regex
 ```
 
-The fields are lexeme-level: there is no `statement_block` or `call_expression`
-token (those are composite constructs, not lexemes) — match a block by its `{`,
-a call by the callee lexeme followed by `(`, and so on.
+- A **bare word** (`debugger`, `lock`, `console`) matches a lexeme by its exact
+  text — you name a keyword, identifier, or property the way it appears in the
+  source. Quote operators and punctuation: `"=="`, `"=>"`, `"{"`.
+- **`@class`** matches the normalized, language-neutral class the frontend
+  assigns — `@ident`, `@prop`, `@str`, `@num`, `@bool`, `@regex`, `@comment`,
+  `@symbol` — so `@ident` means "identifier" in any language with a frontend.
+- **`/regex/`** matches a lexeme whose text matches the regex; **`^/regex/`**
+  requires that it does not. A regex tests every lexeme's text, strings and
+  comments included — conjoin a `@class` to narrow it.
+- **`&`** conjoins atoms on a *single* lexeme: `@ident & /^_/` is one lexeme that
+  is both an identifier and starts with `_`.
+- **`any`** matches one lexeme of any kind (the sequence wildcard, below).
 
-`@class` is a normalized, language-neutral class the frontend assigns, so
-`@ident` means "identifier" in any language with a frontend. `*` is never a
-character wildcard — text patterns are regexes (where `*` is the Kleene star
-*inside* the slashes); a bare `*` is token-level repetition on a sequence step.
-
-This mirrors Cobra one-to-one:
-
-| Cobra | here |
-| --- | --- |
-| `for` (exact lexeme) | `Token[text = "for"]` |
-| `/^pumba/` (text regex) | `/^pumba/` |
-| `@ident` (token class) | `@ident` |
-| `@ident & /^pumba/` | `@ident & /^pumba/` |
-| `.` (any token) | `any` |
-| `*` `+` (token repetition) | `*` `+` `?` on a step |
-| `x:@ident … @x` | `… as x = text … text == $x` |
-
-A `/regex/` matches a token's text, string and comment tokens included — add a
-`@class` to exclude them (e.g. `@ident & /^pumba/`).
+There is no `statement_block` or `call_expression` lexeme — those are composite
+constructs, not lexemes. Match a block by its `{`, a call by the callee lexeme
+followed by `(`, and so on. `*` is never a character wildcard: inside `/…/` it is
+the regex Kleene star, and a bare `*` is token-level repetition on a sequence
+step.
 
 ## Sequences
 
@@ -127,9 +104,9 @@ without it the region is the whole file.
 
 ```
 sequence in scope {
-  Token[text = "validate"]
+  validate
   any *                         # quantifiers: ? (0–1), * (0+), + (1+)
-  ( Token[text = "save"] | Token[text = "commit"] )   # alternation
+  ( save | commit )             # alternation
 }
 ```
 
@@ -142,21 +119,22 @@ sequence in scope {
 ```
 rule lock_without_unlock (error) {
   sequence in scope {
-    Token[text = "lock"]
-    not Token[text = "unlock"] *
+    lock
+    not unlock *
   }
   message "lock() with no unlock() in the same block."
 }
 ```
 
-**Captures** correlate two lexemes by a shared value. `as v = field` binds; a
-later `field == $v` is a backreference:
+**Captures** correlate two lexemes by text, exactly as in Cobra. `x:@ident` binds
+the matched lexeme's text to `x`; a later `:x` is a backreference — the same text
+again:
 
 ```
 sequence {
-  Token[class = "ident"] as n = text     # bind the identifier text
+  x:@ident       # bind the identifier's text to x
   any *
-  Token[class = "ident", text == $n]     # the same identifier again
+  :x             # the same identifier again
   any *
 }
 ```
@@ -171,8 +149,8 @@ sequence:
 
 ```
 rule debugger_in_returning_block (warning) {
-  match Token[node_kind = "debugger"]
-  where scope contains Token[node_kind = "return"]
+  match debugger
+  where scope contains return
   message "A debugger in a block that returns."
 }
 ```
@@ -187,8 +165,8 @@ A rule can be derived from other rules in a pass that runs after the matching
 rules have produced their violations:
 
 ```
-rule uses_fetch (warning) { match Token[text = "fetch"] }
-rule has_debugger (warning) { match Token[node_kind = "debugger"] }
+rule uses_fetch (warning) { match fetch }
+rule has_debugger (warning) { match debugger }
 
 rule fetch_with_debugger (error) {
   compose intersection of uses_fetch, has_debugger by file, function
@@ -215,7 +193,7 @@ A rule can exempt cases inline:
 
 ```
 rule no_debugger (error) {
-  match Token[node_kind = "debugger"]
+  match debugger
   unless path "**/scripts/**"   # by glob
   unless adr "debugging-tools"  # an accepted decision record (repo-wide)
   message "Remove debugger statements."

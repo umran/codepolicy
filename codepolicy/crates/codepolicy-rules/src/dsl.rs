@@ -3,31 +3,28 @@
 //! the compiler. Rules match over the lexeme (token) stream.
 //!
 //! ```text
-//! rule NO_DEBUGGER (error) {
+//! rule no_debugger (error) {
 //!   lang typescript, javascript
-//!   match Token[node_kind = "debugger"]
+//!   match debugger
 //!   message "Remove debugger statements."
 //! }
 //! ```
 //!
-//! Token matchers:
-//!   `Token[ field <op> v, ... ]`   explicit field predicates
-//!   `@class`                       a token class (`@ident`, `@str`, `@num`, …)
-//!   `/regex/`                      a token whose text matches the regex
-//!   `@ident & /re/`                conjunction on one token
-//!   `any`                          any one token (sequence wildcard)
-//!
-//! Predicate operators (inside `Token[ ... ]`):
-//!   `field = "v"` / `field = 5`   equality            (`field`)
-//!   `field ~ /re/`                regex               (`field.regex`)
-//!   `field !~ /re/`               negated regex        (`field.not.regex`)
-//!   `field in ["a","b"]`         membership           (`field.any`)
-//!   `field > 5` / `< <= >=`      numeric comparison    (`field.gt` …)
-//!   `field == $v`                equals a binding      (`field.eq_ref`)
-//!   `field != $v`                differs from binding  (`field.ne_ref`)
+//! Token patterns (the Cobra surface):
+//!   `debugger` / `"=="`   a literal lexeme, matched by its text (quote operators)
+//!   `@class`              a token class (`@ident`, `@str`, `@comment`, …)
+//!   `/re/`                a lexeme whose text matches the regex
+//!   `^/re/`               a lexeme whose text does NOT match the regex
+//!   `@ident & /^_/`       conjunction of atoms on one lexeme
+//!   `any`                 any one lexeme (the sequence wildcard)
+//!   `x:@ident` … `:x`     bind a lexeme's text to `x`, then match the same text
 //!
 //! Bodies: `match <pat> [where scope <clause>]*`, `sequence [in scope] { <step>+ }`,
 //! `compose <op> of A, B [by file, function]`, `count RULE per file > N`.
+//!
+//! A raw `Token[ field <op> v, ... ]` form (operators `= ~ !~ in > < >= <=`) reaches
+//! lexeme fields with no surface syntax (`curly_depth`, `text_len`). It is not the
+//! primary surface and is intentionally left out of the user docs.
 
 use super::{
     AdrGuard, AppliesTo, CompiledRule, PathFilter, RawAnchor, RawCompose, RawCount, RawMatch,
@@ -39,8 +36,6 @@ use std::collections::BTreeMap;
 
 /// Token-pattern predicates, keyed by the compiler's suffix convention.
 type Attrs = BTreeMap<String, Value>;
-/// Captures introduced by a step: variable name -> source field.
-type Binds = BTreeMap<String, String>;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -100,7 +95,10 @@ enum Tok {
     Question,
     Pipe,
     Amp,
-    Dollar,
+    /// `:` — binds a label (`x:@ident`) or introduces a backreference (`:x`).
+    Colon,
+    /// `^` — negates the following `/regex/` atom (`^/re/`).
+    Caret,
 }
 
 fn lex(src: &str) -> R<Vec<(Tok, usize)>> {
@@ -177,8 +175,12 @@ fn lex(src: &str) -> R<Vec<(Tok, usize)>> {
                 push(&mut out, Tok::TypeClass(b[start..j].iter().collect()));
                 i = j;
             }
-            '$' => {
-                push(&mut out, Tok::Dollar);
+            ':' => {
+                push(&mut out, Tok::Colon);
+                i += 1;
+            }
+            '^' => {
+                push(&mut out, Tok::Caret);
                 i += 1;
             }
             '*' => {
@@ -321,6 +323,9 @@ struct Parser {
 impl Parser {
     fn peek(&self) -> Option<&Tok> {
         self.toks.get(self.pos).map(|(t, _)| t)
+    }
+    fn peek_at(&self, n: usize) -> Option<&Tok> {
+        self.toks.get(self.pos + n).map(|(t, _)| t)
     }
     fn line(&self) -> usize {
         self.toks
@@ -546,8 +551,10 @@ impl Parser {
         Ok(())
     }
 
-    /// One token atom: a `@class` matcher (`class = name`) or a `/regex/` text
-    /// matcher (`text.regex = re`). Conjoined with `&` by the caller.
+    /// One token atom in the Cobra surface: a bare `literal` or `"quoted"` literal
+    /// (matched by text), a `@class`, a `/regex/` over the text, a `^/regex/`
+    /// negated text regex, or a `:name` backreference. Conjoined with `&` by the
+    /// caller.
     fn token_atom(&mut self) -> R<Attrs> {
         let mut a = BTreeMap::new();
         match self.bump() {
@@ -557,31 +564,37 @@ impl Parser {
             Some(Tok::Regex(re)) => {
                 a.insert("text.regex".to_string(), Value::String(re));
             }
-            _ => return Err(self.err("expected a `@class` or `/regex/` token matcher")),
+            // A bare word or quoted string is a literal lexeme, matched by text.
+            Some(Tok::Ident(s)) | Some(Tok::Str(s)) => {
+                a.insert("text".to_string(), Value::String(s));
+            }
+            // `:name` — a backreference to a bound lexeme's text.
+            Some(Tok::Colon) => {
+                a.insert("text.eq_ref".to_string(), Value::String(self.ident()?));
+            }
+            // `^/re/` — the text must NOT match the regex.
+            Some(Tok::Caret) => {
+                a.insert("text.not.regex".to_string(), Value::String(self.regex_value()?));
+            }
+            _ => {
+                return Err(
+                    self.err("expected a token pattern: a literal, `@class`, `/regex/`, `:var`, or `any`"),
+                )
+            }
         }
         Ok(a)
     }
 
-    /// A token pattern: `Token[ pred, ... ]`, a `@class`/`/regex/` chain joined by
-    /// `&`, or `any` (the wildcard — an empty predicate set matching any token).
+    /// A token pattern: `any` (the wildcard), a chain of token atoms joined by `&`,
+    /// or the raw `Token[ pred, ... ]` field form.
     fn parse_pattern(&mut self) -> R<Attrs> {
         if self.at_kw("any") {
             self.bump();
             return Ok(BTreeMap::new());
         }
-        // `@class` and/or `/regex/`, conjoined with `&` on one token.
-        if matches!(self.peek(), Some(Tok::Regex(_)) | Some(Tok::TypeClass(_))) {
-            let mut attrs = self.token_atom()?;
-            while self.peek() == Some(&Tok::Amp) {
-                self.bump();
-                for (k, v) in self.token_atom()? {
-                    attrs.insert(k, v);
-                }
-            }
-            return Ok(attrs);
-        }
-        // Explicit field form: `Token[ pred, ... ]`.
-        if self.at_kw("Token") {
+        // Raw field escape: `Token[ pred, ... ]` (kept for lexeme fields with no
+        // surface syntax; not the primary surface).
+        if self.at_kw("Token") && self.peek_at(1) == Some(&Tok::LBrack) {
             self.bump();
             self.expect(&Tok::LBrack)?;
             let mut attrs = BTreeMap::new();
@@ -599,7 +612,15 @@ impl Parser {
             self.expect(&Tok::RBrack)?;
             return Ok(attrs);
         }
-        Err(self.err("expected a token pattern: `Token[...]`, `@class`, `/regex/`, or `any`"))
+        // One or more token atoms conjoined with `&` on a single lexeme.
+        let mut attrs = self.token_atom()?;
+        while self.peek() == Some(&Tok::Amp) {
+            self.bump();
+            for (k, v) in self.token_atom()? {
+                attrs.insert(k, v);
+            }
+        }
+        Ok(attrs)
     }
 
     /// One `field <op> <value>` predicate, returned as the (key, value) pair the
@@ -639,8 +660,6 @@ impl Parser {
             Tok::Lt => Ok((format!("{attr}.lt"), Value::String(self.num_value()?))),
             Tok::Ge => Ok((format!("{attr}.ge"), Value::String(self.num_value()?))),
             Tok::Le => Ok((format!("{attr}.le"), Value::String(self.num_value()?))),
-            Tok::EqEq => Ok((format!("{attr}.eq_ref"), Value::String(self.var_value()?))),
-            Tok::Ne => Ok((format!("{attr}.ne_ref"), Value::String(self.var_value()?))),
             other => Err(self.err(&format!("unexpected operator {other:?}"))),
         }
     }
@@ -663,10 +682,6 @@ impl Parser {
             Some(Tok::Regex(s)) => Ok(s),
             _ => Err(self.err("expected a /regex/")),
         }
-    }
-    fn var_value(&mut self) -> R<String> {
-        self.expect(&Tok::Dollar)?;
-        self.ident()
     }
 
     fn parse_where_scope(&mut self) -> R<RawWhereScope> {
@@ -732,6 +747,18 @@ impl Parser {
             false
         };
 
+        // Cobra binding label: `name:` before the pattern binds the matched
+        // lexeme's text to `name` (referenced later in the sequence as `:name`).
+        let bind_name = if matches!(self.peek(), Some(Tok::Ident(_)))
+            && self.peek_at(1) == Some(&Tok::Colon)
+        {
+            let name = self.ident()?;
+            self.expect(&Tok::Colon)?;
+            Some(name)
+        } else {
+            None
+        };
+
         let (attrs, alt) = if self.peek() == Some(&Tok::LParen) {
             // alternation of single token patterns
             self.bump();
@@ -773,35 +800,19 @@ impl Parser {
             _ => None,
         };
 
-        let mut binds = BTreeMap::new();
-        if self.at_kw("as") {
-            self.bump();
-            binds = self.parse_bindlist()?;
-        }
+        let bind = bind_name.map(|name| {
+            let mut m = BTreeMap::new();
+            m.insert(name, "text".to_string());
+            m
+        });
 
         Ok(RawStep {
             attrs,
             quant,
             negate: Some(negate),
-            bind: if binds.is_empty() { None } else { Some(binds) },
+            bind,
             alt,
         })
-    }
-
-    fn parse_bindlist(&mut self) -> R<Binds> {
-        let mut m = BTreeMap::new();
-        loop {
-            let var = self.ident()?;
-            self.expect(&Tok::Eq)?;
-            let attr = self.ident()?;
-            m.insert(var, attr);
-            if self.peek() == Some(&Tok::Comma) {
-                self.bump();
-            } else {
-                break;
-            }
-        }
-        Ok(m)
     }
 
     fn parse_compose(&mut self) -> R<RawCompose> {
@@ -858,32 +869,50 @@ mod tests {
 
     #[test]
     fn parses_single_token_rule() {
+        // A bare word is a literal lexeme, matched by text — no `Token[...]`.
         let src = r#"
-            rule NO_DEBUGGER (error) {
+            rule no_debugger (error) {
               lang typescript
               in "apps/*/src/**/*.{ts,tsx}"
               not in "**/generated/**"
-              match Token[node_kind = "debugger"]
+              match debugger
               message "Remove debugger statements."
             }
         "#;
         let (rules, _) = load(src).unwrap();
         assert_eq!(rules.len(), 1);
         let r = &rules[0];
-        assert_eq!(r.id, "NO_DEBUGGER");
+        assert_eq!(r.id, "no_debugger");
         assert_eq!(r.preds.len(), 1);
-        assert!(matches!(r.preds[0], super::super::AttrPred::Eq { .. }));
+        assert!(
+            matches!(&r.preds[0], super::super::AttrPred::Eq { attr, value }
+                if attr == "text" && value == "debugger"),
+            "bare `debugger` -> text = \"debugger\": {:?}",
+            r.preds
+        );
         assert!(r.message.as_deref().unwrap().contains("debugger"));
     }
 
     #[test]
-    fn parses_sequence_with_multibind_and_alt() {
+    fn parses_quoted_operator_literal() {
+        // Operators are matched as quoted literals.
+        let (rules, _) = load(r#"rule loose_eq (warning) { match "==" }"#).unwrap();
+        assert!(
+            matches!(&rules[0].preds[0], super::super::AttrPred::Eq { attr, value }
+                if attr == "text" && value == "=="),
+            "`\"==\"` -> text = \"==\": {:?}",
+            rules[0].preds
+        );
+    }
+
+    #[test]
+    fn parses_sequence_with_bind_and_alt() {
         let src = r#"
-            rule SEQ (warning) {
+            rule seq (warning) {
               lang typescript, javascript
               sequence in scope {
-                Token[class = "ident"] as a = text, b = node_kind
-                ( Token[node_kind = "=="] | Token[node_kind = "==="] )
+                x:@ident
+                ( "==" | "===" )
               }
               message "x"
             }
@@ -892,8 +921,37 @@ mod tests {
         let seq = rules[0].sequence.as_ref().unwrap();
         assert!(seq.within_scope);
         assert_eq!(seq.steps.len(), 2);
-        assert_eq!(seq.steps[0].bind.len(), 2, "first step binds two vars");
+        assert_eq!(seq.steps[0].bind.len(), 1, "first step binds one var");
+        assert_eq!(seq.steps[0].bind[0], ("x".into(), "text".into()));
         assert!(matches!(seq.steps[1].matcher, super::super::StepMatcher::Alt(_)));
+    }
+
+    #[test]
+    fn parses_cobra_binding_and_backreference() {
+        // `x:@ident … :x` — bind a lexeme's text, then require it again.
+        let src = r#"
+            rule repeat (warning) {
+              sequence {
+                x:@ident
+                any *
+                :x
+              }
+              message "y"
+            }
+        "#;
+        let (rules, _) = load(src).unwrap();
+        let seq = rules[0].sequence.as_ref().unwrap();
+        assert_eq!(seq.steps.len(), 3);
+        assert_eq!(seq.steps[0].bind[0], ("x".into(), "text".into()));
+        assert!(seq.has_captures);
+        let super::super::StepMatcher::Pat(preds) = &seq.steps[2].matcher else {
+            panic!("backref step should be a plain pattern: {:?}", seq.steps[2].matcher);
+        };
+        assert!(
+            matches!(&preds[0], super::super::AttrPred::EqRef { attr, var }
+                if attr == "text" && var == "x"),
+            "`:x` -> text == bound x: {preds:?}"
+        );
     }
 
     #[test]
@@ -910,9 +968,9 @@ mod tests {
     #[test]
     fn parses_where_scope() {
         let src = r#"
-            rule ACQUIRE (warning) {
-              match Token[text = "acquire"]
-              where scope not contains Token[text = "release"]
+            rule acquire (warning) {
+              match acquire
+              where scope not contains release
             }
         "#;
         let (rules, _) = load(src).unwrap();
@@ -929,7 +987,7 @@ mod tests {
 
     #[test]
     fn at_class_and_amp_desugar_to_class_and_text() {
-        // `@ident & /^pumba/` (Cobra) -> Token[class = "ident", text ~ /^pumba/].
+        // `@ident & /^pumba/` -> class = ident AND text ~ /^pumba/ on one lexeme.
         let (rules, _) = load(r#"rule L (warning) { match @ident & /^pumba/ }"#).unwrap();
         let r = &rules[0];
         assert!(
@@ -953,7 +1011,7 @@ mod tests {
         assert!(
             matches!(&r.preds[0], super::super::AttrPred::Regex { attr, re }
                 if attr == "text" && re.as_str() == "^pumba"),
-            "bare /re/ -> Token[text ~ /re/]: {:?}",
+            "bare /re/ -> text ~ /re/: {:?}",
             r.preds
         );
     }
@@ -961,10 +1019,8 @@ mod tests {
     #[test]
     fn star_after_a_token_is_repetition() {
         // `*` is token-level Kleene on a step, never a character glob.
-        let (rules, _) = load(
-            r#"rule L (warning) { sequence { Token[text = "log"] * Token[text = "save"] } }"#,
-        )
-        .unwrap();
+        let (rules, _) =
+            load(r#"rule L (warning) { sequence { log * save } }"#).unwrap();
         let seq = rules[0].sequence.as_ref().unwrap();
         assert_eq!(seq.steps.len(), 2);
         assert_eq!(

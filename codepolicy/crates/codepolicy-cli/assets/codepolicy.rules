@@ -3,26 +3,26 @@
 
 rule NO_DEBUGGER (error) {
   lang typescript, javascript
-  match Token[node_kind = "debugger"]
+  match debugger
   message "Remove debugger statements before committing."
 }
 
 rule NO_CONSOLE (warning) {
   lang typescript, javascript
   in "apps/**", "packages/**"
-  match Token[node_kind = "identifier", text = "console"]
+  match console
   message "Use the logger instead of console.*"
 }
 
 rule NO_LOOSE_EQUALITY (warning) {
   lang typescript, javascript
-  match Token[node_kind = "=="]
+  match "=="
   message "Use === instead of ==."
 }
 
 rule TODO_NEEDS_ISSUE (warning) {
   lang typescript, javascript
-  match Token[class = "comment", text ~ /\bTODO\b/, text !~ /(#\d+|[A-Z][A-Z0-9]+-\d+|https?:\/\/)/]
+  match @comment & /\bTODO\b/ & ^/(#\d+|[A-Z][A-Z0-9]+-\d+|https?:\/\/)/
   message "Add an issue reference to this TODO, e.g. TODO(#123) or TODO(PROJ-45)."
 }
 

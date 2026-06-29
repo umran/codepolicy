@@ -231,9 +231,9 @@ pub enum AttrPred {
     NotRegex { attr: String, re: Regex },
     /// `field >|<|>=|<= n` — numeric comparison.
     Cmp { attr: String, op: CmpOp, n: f64 },
-    /// `field == $var` — equals a captured value.
+    /// Backreference (`:var`) — some string form equals a captured value.
     EqRef { attr: String, var: String },
-    /// `field != $var` — differs from a captured value.
+    /// Differs from a captured value (`field.ne_ref`; YAML form only).
     NeRef { attr: String, var: String },
 }
 
