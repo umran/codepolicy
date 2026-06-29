@@ -1,0 +1,23 @@
+[package]
+name = "tyrant-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Orchestration: discovery, lexing and the check pipeline for tyrant"
+
+[dependencies]
+tyrant-token.workspace = true
+tyrant-frontends.workspace = true
+tyrant-rules.workspace = true
+tyrant-match.workspace = true
+anyhow.workspace = true
+camino.workspace = true
+ignore.workspace = true
+rayon.workspace = true
+serde_yaml_ng.workspace = true
+serde_json.workspace = true

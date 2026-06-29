@@ -1,0 +1,31 @@
+[package]
+name = "tyrant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities", "development-tools"]
+description = "A Cobra-style lexeme policy engine: write declarative rules over a codebase's tokens and enforce them in a pre-commit hook, CI gate, or agent loop."
+readme = "README.md"
+
+[[bin]]
+name = "tyrant"
+path = "src/main.rs"
+
+[dependencies]
+tyrant-token.workspace = true
+tyrant-frontends.workspace = true
+tyrant-rules.workspace = true
+tyrant-match.workspace = true
+tyrant-report.workspace = true
+tyrant-core.workspace = true
+anyhow.workspace = true
+camino.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

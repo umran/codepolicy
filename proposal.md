@@ -1,6 +1,6 @@
-# codepolicy — design notes
+# tyrant — design notes
 
-`codepolicy` is a fast, multi-language static policy tool inspired by NASA/JPL's
+`tyrant` is a fast, multi-language static policy tool inspired by NASA/JPL's
 Cobra. You write rules — declarative patterns over a file's **lexemes** — and it
 reports every match with `file:line` evidence. It has no built-in opinion about
 good code; it enforces the rules you write.
@@ -24,7 +24,7 @@ identifier `prefix`, inside the string `"x"`, and inside comments; a token
 pattern for `x` matches only the identifier *lexeme* `x`, because the lexer has
 already classified `prefix`, `"x"`, and the comment as their own atomic tokens.
 
-So codepolicy works on the lexer's output — a token stream — and never on raw
+So tyrant works on the lexer's output — a token stream — and never on raw
 text.
 
 ## 2. The token model
@@ -106,7 +106,7 @@ rule applies to any language whose frontend assigns the same `class` names.
 
 - **Inline `unless`** on a rule: `unless path "glob"`, `unless adr "topic"`,
   `unless waiver`.
-- **Waivers** — file-scoped, per-rule exceptions in `.codepolicy/waivers/`.
+- **Waivers** — file-scoped, per-rule exceptions in `.tyrant/waivers/`.
 - **ADRs** — repo-wide accepted decisions in `docs/adr/`, matched by topic.
 
 ## 6. Performance
