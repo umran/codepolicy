@@ -78,8 +78,9 @@ match @comment & /TODO/ & ^/\(#\d+\)/   # a TODO with no (#123) issue reference
 
 - A **bare word** (`var`, `console`, `addEventListener`) matches a lexeme by its
   exact text — you name a keyword, identifier, or property the way it appears in
-  the source. Quote operators and punctuation: `"=="`, `"=>"`, `"{"`. (Quote `"any"`
-  too: bare `any` is the wildcard below.)
+  the source. Operators and punctuation aren't bare words, so quote them: `"=="`,
+  `"=>"`, `"{"`. The bare word `any` is reserved for the wildcard (below), so to
+  match the literal `any` *type* you quote it too: `"any"`.
 - **`@class`** matches the normalized, language-neutral class the frontend
   assigns — `@ident`, `@prop`, `@str`, `@num`, `@bool`, `@regex`, `@comment`,
   `@symbol` — so `@ident` means "identifier" in any language with a frontend.
