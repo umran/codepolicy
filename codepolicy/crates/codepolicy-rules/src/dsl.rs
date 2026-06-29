@@ -1,26 +1,30 @@
 //! A concise, Cobra-flavored textual rule grammar that parses into the same
 //! [`RawRule`](super::RawRule) structures the YAML loader produces, then reuses
-//! the existing compiler. It is purely an alternative front-end — every rule
-//! expressible in YAML is expressible here, and vice versa.
+//! the compiler. Rules match over the lexeme (token) stream.
 //!
 //! ```text
-//! rule NO_MANUAL_GRAPHQL_OPERATION_TYPES (error) {
-//!   lang typescript
-//!   in "apps/*/src/**/*.{ts,tsx}"
-//!   not in "**/generated/**", "**/*.generated.ts"
-//!   match TypeDecl[name ~ /.*(Query|Mutation|Subscription)(Variables)?$/]
-//!   message "Use generated GraphQL types."
+//! rule NO_DEBUGGER (error) {
+//!   lang typescript, javascript
+//!   match Token[node_kind = "debugger"]
+//!   message "Remove debugger statements."
 //! }
 //! ```
 //!
-//! Predicate operators (inside `Kind[ ... ]`):
-//!   `attr = "v"` / `attr = 5`   equality            (`attr`)
-//!   `attr ~ /re/`               regex               (`attr.regex`)
-//!   `attr !~ /re/`              negated regex        (`attr.not.regex`)
-//!   `attr in ["a","b"]`        membership           (`attr.any`)
-//!   `attr > 5` / `< <= >=`     numeric comparison    (`attr.gt` …)
-//!   `attr == $v`               equals a binding      (`attr.eq_ref`)
-//!   `attr != $v`               differs from binding  (`attr.ne_ref`)
+//! Token matchers:
+//!   `Token[ field <op> v, ... ]`   explicit field predicates
+//!   `@class`                       a token class (`@ident`, `@str`, `@num`, …)
+//!   `/regex/`                      a token whose text matches the regex
+//!   `@ident & /re/`                conjunction on one token
+//!   `any`                          any one token (sequence wildcard)
+//!
+//! Predicate operators (inside `Token[ ... ]`):
+//!   `field = "v"` / `field = 5`   equality            (`field`)
+//!   `field ~ /re/`                regex               (`field.regex`)
+//!   `field !~ /re/`               negated regex        (`field.not.regex`)
+//!   `field in ["a","b"]`         membership           (`field.any`)
+//!   `field > 5` / `< <= >=`      numeric comparison    (`field.gt` …)
+//!   `field == $v`                equals a binding      (`field.eq_ref`)
+//!   `field != $v`                differs from binding  (`field.ne_ref`)
 //!
 //! Bodies: `match <pat> [where scope <clause>]*`, `sequence [in scope] { <step>+ }`,
 //! `compose <op> of A, B [by file, function]`, `count RULE per file > N`.
@@ -29,42 +33,14 @@ use super::{
     AdrGuard, AppliesTo, CompiledRule, PathFilter, RawAnchor, RawCompose, RawCount, RawMatch,
     RawRule, RawSequence, RawStep, RawUnless, RawWhereScope, RuleFile, Severity, WaiverGuard,
 };
-use codepolicy_events::{EventKind, Language};
+use codepolicy_token::Language;
 use serde_yaml_ng::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
-/// Friendly syntactic kinds accepted in `arg: kind` annotations (matches the
-/// `argN_kind` values the frontend emits). These are *syntactic* forms, not
-/// static types.
-const KNOWN_KINDS: &[&str] = &[
-    "string",
-    "template",
-    "number",
-    "bool",
-    "identifier",
-    "member",
-    "call",
-    "object",
-    "array",
-    "function",
-    "regex",
-    "null",
-    "undefined",
-    "other",
-];
-
-/// Receiver of a call-sugar pattern: a literal object or a capture variable.
-enum Recv {
-    Lit(String),
-    Var(String),
-}
-
-/// Attribute predicates of a pattern, keyed by the compiler's suffix convention.
+/// Token-pattern predicates, keyed by the compiler's suffix convention.
 type Attrs = BTreeMap<String, Value>;
-/// Captures introduced by a pattern: variable name -> source attribute.
+/// Captures introduced by a step: variable name -> source field.
 type Binds = BTreeMap<String, String>;
-/// A parsed pattern: (event-kind name | `None` for `any`, predicates, captures).
-type Pattern = (Option<String>, Attrs, Binds);
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -87,11 +63,7 @@ pub fn load(text: &str) -> R<(Vec<CompiledRule>, RuleFile)> {
 /// Parse the textual grammar into a [`RuleFile`] (no compilation).
 pub fn parse(text: &str) -> R<RuleFile> {
     let toks = lex(text)?;
-    let mut p = Parser {
-        toks,
-        pos: 0,
-        bound: HashSet::new(),
-    };
+    let mut p = Parser { toks, pos: 0 };
     p.parse_file()
 }
 
@@ -104,6 +76,8 @@ enum Tok {
     Ident(String),
     Str(String),
     Regex(String),
+    /// A `@class` token-class matcher: `@ident`, `@str`, `@num`, …
+    TypeClass(String),
     Num(String),
     LBrace,
     RBrace,
@@ -125,10 +99,8 @@ enum Tok {
     Plus,
     Question,
     Pipe,
+    Amp,
     Dollar,
-    Dot,
-    DotDot,
-    Colon,
 }
 
 fn lex(src: &str) -> R<Vec<(Tok, usize)>> {
@@ -188,6 +160,23 @@ fn lex(src: &str) -> R<Vec<(Tok, usize)>> {
                 push(&mut out, Tok::Pipe);
                 i += 1;
             }
+            '&' => {
+                push(&mut out, Tok::Amp);
+                i += 1;
+            }
+            '@' => {
+                // `@class` token-class matcher: `@` followed by an identifier.
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && is_ident_char(b[j]) {
+                    j += 1;
+                }
+                if j == start {
+                    return Err(DslError(format!("line {line}: expected a class name after `@`")));
+                }
+                push(&mut out, Tok::TypeClass(b[start..j].iter().collect()));
+                i = j;
+            }
             '$' => {
                 push(&mut out, Tok::Dollar);
                 i += 1;
@@ -206,18 +195,6 @@ fn lex(src: &str) -> R<Vec<(Tok, usize)>> {
             }
             '~' => {
                 push(&mut out, Tok::Tilde);
-                i += 1;
-            }
-            ':' => {
-                push(&mut out, Tok::Colon);
-                i += 1;
-            }
-            '.' if two('.') => {
-                push(&mut out, Tok::DotDot);
-                i += 2;
-            }
-            '.' => {
-                push(&mut out, Tok::Dot);
                 i += 1;
             }
             '=' if two('=') => {
@@ -339,9 +316,6 @@ fn read_regex(b: &[char], mut i: usize, line: usize) -> R<(String, usize)> {
 struct Parser {
     toks: Vec<(Tok, usize)>,
     pos: usize,
-    /// Capture variables bound so far in the current rule (for unification:
-    /// a `$var`'s first use binds, later uses match-equal).
-    bound: HashSet<String>,
 }
 
 impl Parser {
@@ -423,7 +397,6 @@ impl Parser {
 
     fn parse_rule(&mut self) -> R<RawRule> {
         self.eat_kw("rule")?;
-        self.bound.clear(); // bindings are scoped to one rule
         let id = self.ident()?;
         let mut severity = Severity::Error;
         if self.peek() == Some(&Tok::LParen) {
@@ -477,9 +450,8 @@ impl Parser {
                 has_unless = true;
             } else if self.at_kw("match") {
                 self.bump();
-                let (kind, attrs, _binds) = self.parse_pattern()?;
-                let event = self.require_kind(kind)?;
-                match_ = Some(RawMatch { event, attrs });
+                let attrs = self.parse_pattern()?;
+                match_ = Some(RawMatch { attrs });
                 if self.at_kw("where") {
                     where_scope = Some(self.parse_where_scope()?);
                 }
@@ -574,164 +546,63 @@ impl Parser {
         Ok(())
     }
 
-    fn require_kind(&self, kind: Option<String>) -> R<EventKind> {
-        match kind {
-            Some(name) => event_kind(&name).ok_or_else(|| self.err_static("unknown event kind")),
-            None => Err(self.err_static("`any` is only allowed as a sequence step, not here")),
+    /// One token atom: a `@class` matcher (`class = name`) or a `/regex/` text
+    /// matcher (`text.regex = re`). Conjoined with `&` by the caller.
+    fn token_atom(&mut self) -> R<Attrs> {
+        let mut a = BTreeMap::new();
+        match self.bump() {
+            Some(Tok::TypeClass(name)) => {
+                a.insert("class".to_string(), Value::String(name));
+            }
+            Some(Tok::Regex(re)) => {
+                a.insert("text.regex".to_string(), Value::String(re));
+            }
+            _ => return Err(self.err("expected a `@class` or `/regex/` token matcher")),
         }
-    }
-    fn err_static(&self, msg: &str) -> DslError {
-        DslError(format!("line {}: {msg}", self.line()))
+        Ok(a)
     }
 
-    /// `Kind[ pred, pred ]`, `Kind`, or `any`. Returns (kind-name, attrs);
-    /// kind-name is `None` for the `any` wildcard.
-    /// Returns (kind-name, attrs, binds). `kind` is `None` for `any`; binds are
-    /// non-empty only for call-sugar captures (`$obj.m($x)`).
-    fn parse_pattern(&mut self) -> R<Pattern> {
+    /// A token pattern: `Token[ pred, ... ]`, a `@class`/`/regex/` chain joined by
+    /// `&`, or `any` (the wildcard — an empty predicate set matching any token).
+    fn parse_pattern(&mut self) -> R<Attrs> {
         if self.at_kw("any") {
             self.bump();
-            return Ok((None, BTreeMap::new(), BTreeMap::new()));
+            return Ok(BTreeMap::new());
         }
-        // `$recv.name(args)` — capture/unify the receiver.
-        if self.peek() == Some(&Tok::Dollar) {
-            let recv = self.var_value()?;
-            self.expect(&Tok::Dot)?;
-            let name = self.ident()?;
-            let (attrs, binds) = self.parse_call_sugar(name, Some(Recv::Var(recv)))?;
-            return Ok((Some("Call".to_string()), attrs, binds));
-        }
-        let id = self.ident()?;
-        match self.peek() {
-            Some(Tok::LBrack) => {
-                // explicit form: Kind[ pred, ... ]
+        // `@class` and/or `/regex/`, conjoined with `&` on one token.
+        if matches!(self.peek(), Some(Tok::Regex(_)) | Some(Tok::TypeClass(_))) {
+            let mut attrs = self.token_atom()?;
+            while self.peek() == Some(&Tok::Amp) {
                 self.bump();
-                let mut attrs = BTreeMap::new();
-                if self.peek() != Some(&Tok::RBrack) {
-                    loop {
-                        let (k, v) = self.parse_pred()?;
-                        attrs.insert(k, v);
-                        if self.peek() == Some(&Tok::Comma) {
-                            self.bump();
-                        } else {
-                            break;
-                        }
+                for (k, v) in self.token_atom()? {
+                    attrs.insert(k, v);
+                }
+            }
+            return Ok(attrs);
+        }
+        // Explicit field form: `Token[ pred, ... ]`.
+        if self.at_kw("Token") {
+            self.bump();
+            self.expect(&Tok::LBrack)?;
+            let mut attrs = BTreeMap::new();
+            if self.peek() != Some(&Tok::RBrack) {
+                loop {
+                    let (k, v) = self.parse_pred()?;
+                    attrs.insert(k, v);
+                    if self.peek() == Some(&Tok::Comma) {
+                        self.bump();
+                    } else {
+                        break;
                     }
                 }
-                self.expect(&Tok::RBrack)?;
-                Ok((Some(id), attrs, BTreeMap::new()))
             }
-            Some(Tok::LParen) => {
-                // call sugar: name(args)
-                let (attrs, binds) = self.parse_call_sugar(id, None)?;
-                Ok((Some("Call".to_string()), attrs, binds))
-            }
-            Some(Tok::Dot) => {
-                // literal receiver: obj.name(args)
-                self.bump();
-                let name = self.ident()?;
-                let (attrs, binds) = self.parse_call_sugar(name, Some(Recv::Lit(id)))?;
-                Ok((Some("Call".to_string()), attrs, binds))
-            }
-            // bare event kind (e.g. EnvAccess)
-            _ => Ok((Some(id), BTreeMap::new(), BTreeMap::new())),
+            self.expect(&Tok::RBrack)?;
+            return Ok(attrs);
         }
+        Err(self.err("expected a token pattern: `Token[...]`, `@class`, `/regex/`, or `any`"))
     }
 
-    /// Parse `( argpat, ... )` for `name(...)`, building attribute predicates
-    /// (`argN`, `argN_kind`, `arg_count`) plus any captures.
-    fn parse_call_sugar(&mut self, name: String, recv: Option<Recv>) -> R<(Attrs, Binds)> {
-        let mut attrs = BTreeMap::new();
-        let mut binds = BTreeMap::new();
-        attrs.insert("name".to_string(), Value::String(name));
-        match recv {
-            Some(Recv::Lit(s)) => {
-                attrs.insert("receiver".to_string(), Value::String(s));
-            }
-            Some(Recv::Var(v)) => self.unify_var(&v, "receiver", &mut attrs, &mut binds),
-            None => {}
-        }
-        self.expect(&Tok::LParen)?;
-        let mut idx = 0usize;
-        let mut rest = false;
-        if self.peek() != Some(&Tok::RParen) {
-            loop {
-                if self.peek() == Some(&Tok::DotDot) {
-                    self.bump();
-                    rest = true;
-                    break;
-                }
-                self.parse_argpat(idx, &mut attrs, &mut binds)?;
-                idx += 1;
-                if self.peek() == Some(&Tok::Comma) {
-                    self.bump();
-                } else {
-                    break;
-                }
-            }
-        }
-        self.expect(&Tok::RParen)?;
-        // Arity: exact unless a trailing `..` allows more.
-        if rest {
-            attrs.insert("arg_count.ge".to_string(), Value::String(idx.to_string()));
-        } else {
-            attrs.insert("arg_count".to_string(), Value::String(idx.to_string()));
-        }
-        Ok((attrs, binds))
-    }
-
-    fn parse_argpat(&mut self, idx: usize, attrs: &mut Attrs, binds: &mut Binds) -> R<()> {
-        let key = format!("arg{idx}");
-        match self.peek() {
-            Some(Tok::Ident(s)) if s == "_" => {
-                self.bump(); // wildcard: no value predicate
-            }
-            Some(Tok::Dollar) => {
-                let v = self.var_value()?;
-                self.unify_var(&v, &key, attrs, binds);
-            }
-            Some(Tok::Str(_)) => {
-                let s = self.string()?;
-                attrs.insert(key.clone(), Value::String(s));
-            }
-            Some(Tok::Num(_)) => {
-                let n = self.num_value()?;
-                attrs.insert(key.clone(), Value::String(n));
-            }
-            Some(Tok::Ident(_)) => {
-                let s = self.ident()?;
-                attrs.insert(key.clone(), Value::String(s));
-            }
-            _ => {
-                return Err(self.err("expected an argument pattern: _, $var, \"str\", number, or name"))
-            }
-        }
-        // optional `: kind` (syntactic kind of the argument expression)
-        if self.peek() == Some(&Tok::Colon) {
-            self.bump();
-            let kind = self.ident()?;
-            if !KNOWN_KINDS.contains(&kind.as_str()) {
-                return Err(self.err(&format!(
-                    "unknown argument kind `{kind}`; expected one of {KNOWN_KINDS:?}"
-                )));
-            }
-            attrs.insert(format!("arg{idx}_kind"), Value::String(kind));
-        }
-        Ok(())
-    }
-
-    /// Unification: a variable's first use binds it (to `attr`); later uses
-    /// become an equality predicate (`attr.eq_ref`).
-    fn unify_var(&mut self, var: &str, attr: &str, attrs: &mut Attrs, binds: &mut Binds) {
-        if self.bound.contains(var) {
-            attrs.insert(format!("{attr}.eq_ref"), Value::String(var.to_string()));
-        } else {
-            self.bound.insert(var.to_string());
-            binds.insert(var.to_string(), attr.to_string());
-        }
-    }
-
-    /// One `attr <op> <value>` predicate, returned as the (key, value) pair the
+    /// One `field <op> <value>` predicate, returned as the (key, value) pair the
     /// compiler expects (operator encoded in the key suffix).
     fn parse_pred(&mut self) -> R<(String, Value)> {
         let attr = self.ident()?;
@@ -826,9 +697,9 @@ impl Parser {
     }
 
     fn clause_match(&mut self) -> R<RawMatch> {
-        let (kind, attrs, _binds) = self.parse_pattern()?;
-        let event = self.require_kind(kind)?;
-        Ok(RawMatch { event, attrs })
+        Ok(RawMatch {
+            attrs: self.parse_pattern()?,
+        })
     }
 
     fn parse_sequence(&mut self) -> R<RawSequence> {
@@ -861,14 +732,13 @@ impl Parser {
             false
         };
 
-        let (event, attrs, mut binds, alt) = if self.peek() == Some(&Tok::LParen) {
-            // alternation of single-event patterns (captures inside alts are dropped)
+        let (attrs, alt) = if self.peek() == Some(&Tok::LParen) {
+            // alternation of single token patterns
             self.bump();
             let mut alts: Vec<Vec<RawStep>> = Vec::new();
             loop {
-                let (kind, a, _b) = self.parse_pattern()?;
+                let a = self.parse_pattern()?;
                 alts.push(vec![RawStep {
-                    event: kind,
                     attrs: a,
                     quant: None,
                     negate: None,
@@ -882,10 +752,9 @@ impl Parser {
                 }
             }
             self.expect(&Tok::RParen)?;
-            (None, BTreeMap::new(), BTreeMap::new(), Some(alts))
+            (BTreeMap::new(), Some(alts))
         } else {
-            let (kind, a, b) = self.parse_pattern()?;
-            (kind, a, b, None)
+            (self.parse_pattern()?, None)
         };
 
         let quant = match self.peek() {
@@ -904,16 +773,13 @@ impl Parser {
             _ => None,
         };
 
-        // explicit `as v=attr, ...` bindings merge with any call-sugar captures
+        let mut binds = BTreeMap::new();
         if self.at_kw("as") {
             self.bump();
-            for (k, v) in self.parse_bindlist()? {
-                binds.insert(k, v);
-            }
+            binds = self.parse_bindlist()?;
         }
 
         Ok(RawStep {
-            event,
             attrs,
             quant,
             negate: Some(negate),
@@ -922,13 +788,12 @@ impl Parser {
         })
     }
 
-    fn parse_bindlist(&mut self) -> R<BTreeMap<String, String>> {
+    fn parse_bindlist(&mut self) -> R<Binds> {
         let mut m = BTreeMap::new();
         loop {
             let var = self.ident()?;
             self.expect(&Tok::Eq)?;
             let attr = self.ident()?;
-            self.bound.insert(var.clone()); // so later `$var` unifies as a backreference
             m.insert(var, attr);
             if self.peek() == Some(&Tok::Comma) {
                 self.bump();
@@ -975,7 +840,7 @@ impl Parser {
         let n: u64 = match self.bump() {
             Some(Tok::Num(s)) => s
                 .parse()
-                .map_err(|_| self.err_static("count threshold must be an integer"))?,
+                .map_err(|_| DslError(format!("line {}: count threshold must be an integer", self.line())))?,
             _ => return Err(self.err("expected an integer threshold")),
         };
         Ok(RawCount {
@@ -987,54 +852,48 @@ impl Parser {
     }
 }
 
-fn event_kind(name: &str) -> Option<EventKind> {
-    serde_json::from_value(serde_json::Value::String(name.to_string())).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parses_single_event_rule() {
+    fn parses_single_token_rule() {
         let src = r#"
-            rule NO_MANUAL_GRAPHQL_OPERATION_TYPES (error) {
+            rule NO_DEBUGGER (error) {
               lang typescript
               in "apps/*/src/**/*.{ts,tsx}"
-              not in "**/generated/**", "**/*.generated.ts"
-              match TypeDecl[name ~ /.*(Query|Mutation|Subscription)(Variables)?$/]
-              message "Use generated GraphQL types."
+              not in "**/generated/**"
+              match Token[node_kind = "debugger"]
+              message "Remove debugger statements."
             }
         "#;
         let (rules, _) = load(src).unwrap();
         assert_eq!(rules.len(), 1);
         let r = &rules[0];
-        assert_eq!(r.id, "NO_MANUAL_GRAPHQL_OPERATION_TYPES");
-        assert_eq!(r.event, EventKind::TypeDecl);
+        assert_eq!(r.id, "NO_DEBUGGER");
         assert_eq!(r.preds.len(), 1);
-        assert!(matches!(r.preds[0], super::super::AttrPred::Regex { .. }));
-        assert!(r.message.as_deref().unwrap().contains("generated"));
+        assert!(matches!(r.preds[0], super::super::AttrPred::Eq { .. }));
+        assert!(r.message.as_deref().unwrap().contains("debugger"));
     }
 
     #[test]
     fn parses_sequence_with_multibind_and_alt() {
         let src = r#"
-            rule EVENT_LISTENER_LEAK (warning) {
+            rule SEQ (warning) {
               lang typescript, javascript
               sequence in scope {
-                Call[name="addEventListener"] as obj=receiver, ev=string_args
-                not Call[name="removeEventListener", receiver==$obj, string_args==$ev] *
+                Token[class = "ident"] as a = text, b = node_kind
+                ( Token[node_kind = "=="] | Token[node_kind = "==="] )
               }
-              message "leak"
+              message "x"
             }
         "#;
         let (rules, _) = load(src).unwrap();
         let seq = rules[0].sequence.as_ref().unwrap();
         assert!(seq.within_scope);
-        assert!(seq.has_captures);
         assert_eq!(seq.steps.len(), 2);
-        // first step binds two vars
-        assert_eq!(seq.steps[0].bind.len(), 2);
+        assert_eq!(seq.steps[0].bind.len(), 2, "first step binds two vars");
+        assert!(matches!(seq.steps[1].matcher, super::super::StepMatcher::Alt(_)));
     }
 
     #[test]
@@ -1052,8 +911,8 @@ mod tests {
     fn parses_where_scope() {
         let src = r#"
             rule ACQUIRE (warning) {
-              match Call[name="acquire"]
-              where scope not contains Call[name="release"]
+              match Token[text = "acquire"]
+              where scope not contains Token[text = "release"]
             }
         "#;
         let (rules, _) = load(src).unwrap();
@@ -1069,45 +928,49 @@ mod tests {
     }
 
     #[test]
-    fn positional_sugar_desugars_to_arg_predicates() {
-        let src = r#"
-            rule POS (warning) {
-              lang typescript
-              match foo(a, $x: string, b)
-            }
-        "#;
-        let (rules, _) = load(src).unwrap();
+    fn at_class_and_amp_desugar_to_class_and_text() {
+        // `@ident & /^pumba/` (Cobra) -> Token[class = "ident", text ~ /^pumba/].
+        let (rules, _) = load(r#"rule L (warning) { match @ident & /^pumba/ }"#).unwrap();
         let r = &rules[0];
-        assert_eq!(r.event, EventKind::Call);
-        let names: Vec<&str> = r.preds.iter().map(|p| p.attr_name()).collect();
-        for want in ["name", "arg0", "arg1_kind", "arg2", "arg_count"] {
-            assert!(names.contains(&want), "missing predicate on `{want}`: {names:?}");
-        }
+        assert!(
+            r.preds.iter().any(|p| matches!(p, super::super::AttrPred::Eq { attr, value }
+                if attr == "class" && value == "ident")),
+            "@ident -> class = ident: {:?}",
+            r.preds
+        );
+        assert!(
+            r.preds.iter().any(|p| matches!(p, super::super::AttrPred::Regex { attr, re }
+                if attr == "text" && re.as_str() == "^pumba")),
+            "/^pumba/ -> text ~ /^pumba/: {:?}",
+            r.preds
+        );
     }
 
     #[test]
-    fn unification_first_binds_then_backrefs() {
-        let src = r#"
-            rule U (warning) {
-              sequence in scope {
-                $obj.addEventListener($ev, ..)
-                not $obj.removeEventListener($ev, ..) *
-              }
-            }
-        "#;
-        let (rules, _) = load(src).unwrap();
+    fn bare_regex_is_a_text_regex_token_matcher() {
+        let (rules, _) = load(r#"rule L (warning) { match /^pumba/ }"#).unwrap();
+        let r = &rules[0];
+        assert!(
+            matches!(&r.preds[0], super::super::AttrPred::Regex { attr, re }
+                if attr == "text" && re.as_str() == "^pumba"),
+            "bare /re/ -> Token[text ~ /re/]: {:?}",
+            r.preds
+        );
+    }
+
+    #[test]
+    fn star_after_a_token_is_repetition() {
+        // `*` is token-level Kleene on a step, never a character glob.
+        let (rules, _) = load(
+            r#"rule L (warning) { sequence { Token[text = "log"] * Token[text = "save"] } }"#,
+        )
+        .unwrap();
         let seq = rules[0].sequence.as_ref().unwrap();
         assert_eq!(seq.steps.len(), 2);
-        assert_eq!(seq.steps[0].bind.len(), 2, "first step binds obj + ev");
-        assert!(seq.steps[1].bind.is_empty(), "second step only backreferences");
-        if let crate::StepMatcher::Event { preds, .. } = &seq.steps[1].matcher {
-            let eqrefs = preds
-                .iter()
-                .filter(|p| matches!(p, crate::AttrPred::EqRef { .. }))
-                .count();
-            assert_eq!(eqrefs, 2, "receiver and arg0 are backreferenced");
-        } else {
-            panic!("expected an Event matcher");
-        }
+        assert_eq!(
+            seq.steps[0].quant,
+            crate::Quant::ZeroOrMore,
+            "the `log` lexeme step repeats"
+        );
     }
 }

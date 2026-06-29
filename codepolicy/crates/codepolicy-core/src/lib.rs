@@ -1,10 +1,10 @@
-//! Orchestration (proposal §5, §10): discover files, extract events with the
-//! frontends, load escape hatches, and run the matcher.
+//! Orchestration: discover files, lex them with the frontends, load escape
+//! hatches, and run the matcher.
 
 use camino::{Utf8Path, Utf8PathBuf};
-use codepolicy_events::{Event, EventKind, TokenStream};
-use codepolicy_frontends::{default_frontends, frontend_for, LanguageFrontend, SourceFile};
-use codepolicy_match::{run, AdrRecord, EventIndex, MatchContext, Violation, WaiverRecord};
+use codepolicy_token::TokenStream;
+use codepolicy_frontends::{frontend_for, frontends, Frontend, SourceFile};
+use codepolicy_match::{run, AdrRecord, MatchContext, Violation, WaiverRecord};
 use codepolicy_rules::CompiledRule;
 use rayon::prelude::*;
 
@@ -14,14 +14,14 @@ const DEFAULT_ADR_DIR: &str = "docs/adr";
 /// Everything needed to run a check against a repository root.
 pub struct Project {
     pub root: Utf8PathBuf,
-    pub frontends: Vec<Box<dyn LanguageFrontend>>,
+    pub frontends: Vec<Box<dyn Frontend>>,
 }
 
 impl Project {
     pub fn new(root: impl Into<Utf8PathBuf>) -> Self {
         Project {
             root: root.into(),
-            frontends: default_frontends(),
+            frontends: frontends(),
         }
     }
 
@@ -52,15 +52,10 @@ impl Project {
             .to_path_buf()
     }
 
-    /// Extract from a single file: canonical events plus (when `want_tokens`)
-    /// the compact token stream. Paths are repo-relative.
-    pub fn extract_file(
-        &self,
-        path: &Utf8Path,
-        want_tokens: bool,
-    ) -> anyhow::Result<(Vec<Event>, Option<TokenStream>)> {
+    /// Lex a single file into its token stream. Paths are repo-relative.
+    pub fn lex_file(&self, path: &Utf8Path) -> anyhow::Result<Option<TokenStream>> {
         let Some(frontend) = frontend_for(&self.frontends, path) else {
-            return Ok((Vec::new(), None));
+            return Ok(None);
         };
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("failed to read {path}: {e}"))?;
@@ -69,32 +64,20 @@ impl Project {
             path: rel,
             text: &text,
         };
-        let extracted = frontend.extract(&source, want_tokens)?;
-        Ok((extracted.events, extracted.tokens))
+        Ok(Some(frontend.lex(&source)?))
     }
 
-    /// Extract from all discovered files, in parallel: the combined canonical
-    /// event stream and the per-file compact token streams.
-    pub fn extract_all(&self, want_tokens: bool) -> (Vec<Event>, Vec<TokenStream>) {
-        let files = self.discover();
-        let per_file: Vec<(Vec<Event>, Option<TokenStream>)> = files
+    /// Lex all discovered files, in parallel, into their token streams.
+    pub fn lex_all(&self) -> Vec<TokenStream> {
+        self.discover()
             .par_iter()
-            .map(|path| {
-                self.extract_file(path, want_tokens).unwrap_or_else(|err| {
+            .filter_map(|path| {
+                self.lex_file(path).unwrap_or_else(|err| {
                     eprintln!("warning: {err}");
-                    (Vec::new(), None)
+                    None
                 })
             })
-            .collect();
-        let mut events = Vec::new();
-        let mut tokens = Vec::new();
-        for (evs, ts) in per_file {
-            events.extend(evs);
-            if let Some(ts) = ts {
-                tokens.push(ts);
-            }
-        }
-        (events, tokens)
+            .collect()
     }
 
     /// Load waivers and ADRs from the configured (or default) directories.
@@ -111,14 +94,10 @@ impl Project {
         }
     }
 
-    /// Full pipeline: extract, index, match. The generic `Token` stream is
-    /// emitted only if some rule references it (Cobra-style matching is
-    /// pay-for-what-you-use).
+    /// Full pipeline: lex all files, then match.
     pub fn check(&self, rules: &[CompiledRule], ctx: &MatchContext) -> Vec<Violation> {
-        let needs_tokens = rules.iter().any(|r| r.references_kind(EventKind::Token));
-        let (events, tokens) = self.extract_all(needs_tokens);
-        let index = EventIndex::build(&events);
-        run(rules, &index, &tokens, ctx)
+        let tokens = self.lex_all();
+        run(rules, &tokens, ctx)
     }
 }
 

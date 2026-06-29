@@ -1,6 +1,0 @@
-id: WAIVER-0007
-rule: NO_DIRECT_ZUSTAND_OUTSIDE_STATE_PACKAGE
-file: apps/web/src/store.ts
-reason: Temporary migration path while @app/state wrapper is being introduced.
-expires: 2026-09-01
-approved_by: lead-engineer

@@ -1,75 +1,35 @@
-# codepolicy starter pack — Cobra-flavored textual grammar.
-# Equivalent to the bundled codepolicy.yaml; see the README for the full syntax.
+# codepolicy starter pack — Cobra-style lexeme rules.
+# Rules match over the lexer's token stream. See the README for the grammar.
 
-# --- Frontend GraphQL ------------------------------------------------------
-rule NO_DIRECT_GRAPHQL_CLIENT (error) {
+rule NO_DEBUGGER (error) {
   lang typescript, javascript
-  in "apps/*/src/**/*.{ts,tsx,js,jsx}", "packages/**/*.{ts,tsx,js,jsx}"
-  not in "packages/graphql/**"
-  match Import[source = "@apollo/client", symbols in ["useQuery", "useMutation", "gql", "ApolloClient"]]
-  message "Use @app/graphql generated hooks instead of importing Apollo directly."
+  match Token[node_kind = "debugger"]
+  message "Remove debugger statements before committing."
 }
 
-rule NO_RAW_GRAPHQL_FETCH (error) {
+rule NO_CONSOLE (warning) {
   lang typescript, javascript
-  in "apps/*/src/**/*.{ts,tsx,js,jsx}"
-  match Call[name = "fetch", string_args ~ /.*graphql.*/]
-  message "Do not call the GraphQL endpoint directly. Use @app/graphql."
+  in "apps/**", "packages/**"
+  match Token[node_kind = "identifier", text = "console"]
+  message "Use the logger instead of console.*"
 }
 
-rule NO_MANUAL_GRAPHQL_OPERATION_TYPES (error) {
-  lang typescript
-  in "apps/*/src/**/*.{ts,tsx}"
-  not in "**/generated/**", "**/*.generated.ts"
-  match TypeDecl[name ~ /.*(Query|Mutation|Subscription)(Variables)?$/]
-  message "Do not hand-write GraphQL operation types. Use generated types."
-}
-
-# --- Frontend state --------------------------------------------------------
-rule NO_UNAPPROVED_STATE_LIBRARY (error) {
-  match PackageAdded[name in ["redux", "@reduxjs/toolkit", "recoil", "jotai", "mobx", "xstate"]]
-  unless adr "state management exception"
-  message "Use Zustand/@app/state unless an ADR justifies another state library."
-}
-
-rule NO_DIRECT_ZUSTAND_OUTSIDE_STATE_PACKAGE (warning) {
+rule NO_LOOSE_EQUALITY (warning) {
   lang typescript, javascript
-  in "apps/*/src/**/*.{ts,tsx,js,jsx}"
-  not in "packages/state/**"
-  match Import[source = "zustand"]
-  message "Import state helpers from @app/state instead of importing Zustand directly."
+  match Token[node_kind = "=="]
+  message "Use === instead of ==."
 }
 
-# --- Cross-language config -------------------------------------------------
-rule NO_DIRECT_ENV_ACCESS (error) {
-  lang typescript, javascript, go, python, rust
-  not in "**/config/**", "**/settings/**", "**/config.ts", "**/settings.ts"
-  match EnvAccess
-  message "Read environment variables through the typed config/settings layer."
-}
-
-# --- Provider SDKs ---------------------------------------------------------
-rule NO_PROVIDER_SDK_OUTSIDE_INFRA (error) {
+rule TODO_NEEDS_ISSUE (warning) {
   lang typescript, javascript
-  in "**/*.{ts,tsx,js,jsx}"
-  not in "packages/infra/**", "**/infrastructure/**"
-  match Import[source ~ /^(aws-sdk|@aws-sdk\/.*|stripe|twilio|googleapis|firebase-admin|@sendgrid\/.*)$/]
-  message "Import provider SDKs only from the approved infrastructure packages."
-}
-
-# --- Hygiene ---------------------------------------------------------------
-rule NO_TODO_WITHOUT_ISSUE (warning) {
-  lang typescript, javascript
-  match Comment[text ~ /\bTODO\b/, text !~ /(#\d+|[A-Z][A-Z0-9]+-\d+|https?:\/\/)/]
+  match Token[class = "comment", text ~ /\bTODO\b/, text !~ /(#\d+|[A-Z][A-Z0-9]+-\d+|https?:\/\/)/]
   message "Add an issue reference to this TODO, e.g. TODO(#123) or TODO(PROJ-45)."
 }
 
-# --- Resource pairing (sequence + capture, in JS-like call syntax) ---------
-rule EVENT_LISTENER_LEAK (warning) {
+rule NO_SNAKE_CASE_LOCALS (warning) {
   lang typescript, javascript
-  sequence in scope {
-    $obj.addEventListener($ev, ..)
-    not $obj.removeEventListener($ev, ..) *
-  }
-  message "addEventListener has no matching removeEventListener (same object + event) in this scope."
+  in "apps/**"
+  match @ident & /_[a-z]/
+  unless adr "snake-case naming exception"
+  message "Use camelCase for identifiers."
 }

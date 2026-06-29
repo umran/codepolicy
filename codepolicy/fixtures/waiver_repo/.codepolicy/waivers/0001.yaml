@@ -1,0 +1,2 @@
+rule: NO_DEBUGGER
+file: apps/x.ts

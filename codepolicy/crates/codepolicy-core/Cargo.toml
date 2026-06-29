@@ -3,10 +3,10 @@ name = "codepolicy-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Orchestration: discovery, extraction and the check pipeline for codepolicy"
+description = "Orchestration: discovery, lexing and the check pipeline for codepolicy"
 
 [dependencies]
-codepolicy-events.workspace = true
+codepolicy-token.workspace = true
 codepolicy-frontends.workspace = true
 codepolicy-rules.workspace = true
 codepolicy-match.workspace = true

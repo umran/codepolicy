@@ -1,12 +1,12 @@
-//! Rule schema and compilation (proposal §8, §9.1.1).
+//! Rule schema and compilation.
 //!
-//! Rules are written in YAML, parsed into [`RawRule`], then compiled into a
-//! [`CompiledRule`] whose globs and regexes are pre-built for fast matching.
-//! A rule body is either a single-event `match` (§8.2–8.5) or a
-//! `match_sequence` (§8.6–8.7) with quantifiers, alternation, negation, and
-//! capture/backreferences.
+//! Rules are written in the textual DSL (or YAML), parsed into [`RawRule`], then
+//! compiled into a [`CompiledRule`] with globs and regexes pre-built. Every rule
+//! matches over the lexeme (token) stream. A rule body is one of: a single
+//! `match` (a token pattern), a `match_sequence` (ordered token patterns), a
+//! `compose` set-algebra over other rules, or a `count` threshold.
 
-use codepolicy_events::{Event, EventKind, Language};
+use codepolicy_token::{Language, TokenRef};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -51,10 +51,10 @@ impl Severity {
 pub struct RuleFile {
     #[serde(default)]
     pub rules: Vec<RawRule>,
-    /// Directory of structured waivers (proposal §14). Default `.codepolicy/waivers`.
+    /// Directory of structured waivers. Default `.codepolicy/waivers`.
     #[serde(default)]
     pub waivers_dir: Option<String>,
-    /// Directory of ADRs (proposal §14). Default `docs/adr`.
+    /// Directory of ADRs. Default `docs/adr`.
     #[serde(default)]
     pub adr_dir: Option<String>,
 }
@@ -69,19 +69,19 @@ pub struct RawRule {
     pub message: Option<String>,
     #[serde(default)]
     pub applies_to: Option<AppliesTo>,
-    /// Single-event body (§8.2–8.5). Mutually exclusive with `match_sequence`.
+    /// Single-token-pattern body. Mutually exclusive with the others.
     #[serde(rename = "match", default)]
     pub match_: Option<RawMatch>,
-    /// Sequence body (§8.6–8.7).
+    /// Sequence body — an ordered run of token patterns.
     #[serde(default)]
     pub match_sequence: Option<RawSequence>,
-    /// Scope-relative predicates on a single-event match (§8.9).
+    /// Scope-relative predicates on a single `match`.
     #[serde(default)]
     pub where_scope: Option<RawWhereScope>,
-    /// Set algebra over other rules' violations (§8.10).
+    /// Set algebra over other rules' violations.
     #[serde(default)]
     pub compose: Option<RawCompose>,
-    /// Cardinality threshold over another rule's violations (§8.10).
+    /// Cardinality threshold over another rule's violations.
     #[serde(default)]
     pub count: Option<RawCount>,
     #[serde(default)]
@@ -135,10 +135,11 @@ pub struct PathFilter {
     pub exclude: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// A token pattern: a set of field predicates (`node_kind`, `class`, `text`,
+/// `text.regex`, `curly_depth.gt`, …). Empty matches any token.
+#[derive(Debug, Default, Deserialize)]
 pub struct RawMatch {
-    pub event: EventKind,
-    #[serde(default)]
+    #[serde(flatten)]
     pub attrs: BTreeMap<String, serde_yaml_ng::Value>,
 }
 
@@ -151,23 +152,21 @@ pub struct RawSequence {
 
 #[derive(Debug, Deserialize)]
 pub struct RawAnchor {
-    /// e.g. "ScopeStart..ScopeEnd" — restrict the sequence to one enclosing scope.
+    /// e.g. "ScopeStart..ScopeEnd" — restrict the sequence to one `{}` block.
     #[serde(default)]
     pub within: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct RawStep {
-    /// Event kind, or "Any" for the wildcard. Omitted with `alt`.
-    #[serde(default)]
-    pub event: Option<String>,
+    /// Token-pattern predicates. Empty matches any token (the wildcard).
     #[serde(default)]
     pub attrs: BTreeMap<String, serde_yaml_ng::Value>,
     #[serde(default)]
     pub quant: Option<String>,
     #[serde(default)]
     pub negate: Option<bool>,
-    /// Capture: `{ var: attr }` — bind the (scalar) value of `attr` to `var`.
+    /// Capture: `{ var: field }` — bind the (scalar) value of `field` to `var`.
     #[serde(default)]
     pub bind: Option<BTreeMap<String, String>>,
     /// Alternation: a list of single-step alternatives.
@@ -219,22 +218,22 @@ impl CmpOp {
     }
 }
 
-/// One compiled attribute predicate (proposal §9.1.1).
+/// One compiled field predicate.
 #[derive(Debug, Clone)]
 pub enum AttrPred {
-    /// `attr: v` — the attribute's string forms contain `v`.
+    /// `field = v` — some string form equals `v`.
     Eq { attr: String, value: String },
-    /// `attr.any: [..]` — the attribute overlaps the listed values.
+    /// `field in [..]` — some string form is in the set.
     AnyOf { attr: String, values: Vec<String> },
-    /// `attr.regex: p` / `attr.any.regex: p` — some string form matches `p`.
+    /// `field ~ /p/` — some string form matches `p`.
     Regex { attr: String, re: Regex },
-    /// `attr.not.regex: p` — **no** string form matches `p`.
+    /// `field !~ /p/` — no string form matches `p`.
     NotRegex { attr: String, re: Regex },
-    /// `attr.gt/.lt/.ge/.le: n` — numeric comparison (§8.8).
+    /// `field >|<|>=|<= n` — numeric comparison.
     Cmp { attr: String, op: CmpOp, n: f64 },
-    /// `attr.eq_ref: var` — attribute equals a captured value (§8.7).
+    /// `field == $var` — equals a captured value.
     EqRef { attr: String, var: String },
-    /// `attr.ne_ref: var` — attribute differs from a captured value (§8.7).
+    /// `field != $var` — differs from a captured value.
     NeRef { attr: String, var: String },
 }
 
@@ -251,8 +250,8 @@ impl AttrPred {
         }
     }
 
-    /// Evaluate against an event's normalized attribute strings, with a capture
-    /// environment for `eq_ref`/`ne_ref` (empty for single-event rules).
+    /// Evaluate against a token field's normalized string forms, with a capture
+    /// environment for `eq_ref`/`ne_ref` (empty for single-token rules).
     pub fn eval(&self, values: &[String], binds: &Bindings) -> bool {
         match self {
             AttrPred::Eq { value, .. } => values.iter().any(|v| v == value),
@@ -281,32 +280,22 @@ pub enum Quant {
     ZeroOrMore,
 }
 
-/// What a single sequence step matches against one event.
+/// What a single sequence step matches against one token.
 #[derive(Debug, Clone)]
 pub enum StepMatcher {
-    /// Match an event kind (None = any kind) with attribute predicates.
-    Event {
-        kind: Option<EventKind>,
-        preds: Vec<AttrPred>,
-    },
-    /// Match if any alternative matches (alternation of single-event matchers).
+    /// A token pattern — all predicates must hold (empty = any token).
+    Pat(Vec<AttrPred>),
+    /// Match if any alternative matches.
     Alt(Vec<StepMatcher>),
 }
 
 impl StepMatcher {
-    pub fn matches(&self, ev: &Event, binds: &Bindings) -> bool {
+    pub fn matches(&self, t: &TokenRef, binds: &Bindings) -> bool {
         match self {
-            StepMatcher::Event { kind, preds } => {
-                if let Some(k) = kind {
-                    if ev.kind != *k {
-                        return false;
-                    }
-                }
-                preds
-                    .iter()
-                    .all(|p| p.eval(&ev.attr_strings(p.attr_name()), binds))
-            }
-            StepMatcher::Alt(alts) => alts.iter().any(|m| m.matches(ev, binds)),
+            StepMatcher::Pat(preds) => preds
+                .iter()
+                .all(|p| p.eval(&t.field_strings(p.attr_name()), binds)),
+            StepMatcher::Alt(alts) => alts.iter().any(|m| m.matches(t, binds)),
         }
     }
 }
@@ -316,16 +305,15 @@ pub struct CompiledStep {
     pub matcher: StepMatcher,
     pub quant: Quant,
     pub negate: bool,
-    /// `(var, attr)` pairs — capture each `attr`'s (scalar) value into `var`
-    /// when this step matches. Empty if the step binds nothing. A step may bind
-    /// several values at once (e.g. both `receiver` and `string_args`).
+    /// `(var, field)` pairs — capture each `field`'s (scalar) value into `var`
+    /// when this step matches.
     pub bind: Vec<(String, String)>,
 }
 
 impl CompiledStep {
-    /// Whether this step accepts the given event (honoring `negate`).
-    pub fn accepts(&self, ev: &Event, binds: &Bindings) -> bool {
-        let m = self.matcher.matches(ev, binds);
+    /// Whether this step accepts the given token (honoring `negate`).
+    pub fn accepts(&self, t: &TokenRef, binds: &Bindings) -> bool {
+        let m = self.matcher.matches(t, binds);
         if self.negate {
             !m
         } else {
@@ -334,13 +322,13 @@ impl CompiledStep {
     }
 
     /// Apply this step's captures (if any) to produce an extended environment.
-    pub fn apply_bind(&self, ev: &Event, binds: &Bindings) -> Bindings {
+    pub fn apply_bind(&self, t: &TokenRef, binds: &Bindings) -> Bindings {
         if self.bind.is_empty() {
             return binds.clone();
         }
         let mut next = binds.clone();
         for (var, attr) in &self.bind {
-            if let Some(v) = ev.attr_strings(attr).into_iter().next() {
+            if let Some(v) = t.field_strings(attr).into_iter().next() {
                 next.insert(var.clone(), v);
             }
         }
@@ -348,35 +336,31 @@ impl CompiledStep {
     }
 }
 
-/// A single-event matcher used by `where_scope` clauses (§8.9).
+/// A token pattern used by `where_scope` clauses.
 #[derive(Debug, Clone)]
-pub struct EventMatcher {
-    pub kind: EventKind,
+pub struct ClauseMatcher {
     pub preds: Vec<AttrPred>,
 }
 
-impl EventMatcher {
-    pub fn matches(&self, ev: &Event) -> bool {
-        if ev.kind != self.kind {
-            return false;
-        }
+impl ClauseMatcher {
+    pub fn matches(&self, t: &TokenRef) -> bool {
         let empty = Bindings::new();
         self.preds
             .iter()
-            .all(|p| p.eval(&ev.attr_strings(p.attr_name()), &empty))
+            .all(|p| p.eval(&t.field_strings(p.attr_name()), &empty))
     }
 }
 
-/// Scope-relative predicates evaluated against the matched event's enclosing
-/// `ScopeStart`/`ScopeEnd` region (§8.9). All present clauses are ANDed.
+/// Scope-relative predicates evaluated against the matched token's enclosing
+/// `{}` block. All present clauses are ANDed.
 #[derive(Debug)]
 pub struct CompiledWhereScope {
-    pub contains: Option<EventMatcher>,
-    pub not_contains: Option<EventMatcher>,
-    pub followed_by: Option<EventMatcher>,
+    pub contains: Option<ClauseMatcher>,
+    pub not_contains: Option<ClauseMatcher>,
+    pub followed_by: Option<ClauseMatcher>,
 }
 
-/// Set-algebra operator for `compose` (§8.10).
+/// Set-algebra operator for `compose`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetOp {
     Intersection,
@@ -384,7 +368,7 @@ pub enum SetOp {
     Difference,
 }
 
-/// One component of a `compose` locus key (§8.10).
+/// One component of a `compose`/`count` locus key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyPart {
     File,
@@ -398,14 +382,14 @@ pub struct CompiledCompose {
     pub key: Vec<KeyPart>,
 }
 
-/// Scope over which a `count` rule aggregates (§8.10).
+/// Scope over which a `count` rule aggregates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CountScope {
     File,
     Function,
 }
 
-/// Comparison operator for a `count` threshold (§8.10).
+/// Comparison operator for a `count` threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CountOp {
     Gt,
@@ -437,9 +421,8 @@ pub struct CompiledCount {
 
 #[derive(Debug)]
 pub struct CompiledSequence {
-    /// True when anchored to a single `ScopeStart..ScopeEnd` region.
+    /// True when anchored to a single `{}` block.
     pub within_scope: bool,
-    /// Steps, with an implicit leading `Any*` already prepended (index 0).
     pub steps: Vec<CompiledStep>,
     /// Whether any step binds or backreferences (disables (si,ei) memoization).
     pub has_captures: bool,
@@ -461,17 +444,15 @@ pub struct CompiledRule {
     pub languages: Option<Vec<Language>>,
     pub include: Option<GlobSet>,
     pub exclude: Option<GlobSet>,
-    /// Single-event kind. Meaningful only when `sequence` is `None`.
-    pub event: EventKind,
-    /// Single-event predicates. Meaningful only when `sequence` is `None`.
+    /// Single-token-pattern predicates. Meaningful only when `sequence` is `None`.
     pub preds: Vec<AttrPred>,
-    /// Present for `match_sequence` rules (§8.6).
+    /// Present for `match_sequence` rules.
     pub sequence: Option<CompiledSequence>,
-    /// Present for single-event rules carrying a `where_scope` clause (§8.9).
+    /// Present for a single `match` carrying a `where_scope` clause.
     pub where_scope: Option<CompiledWhereScope>,
-    /// Present for `compose` rules (§8.10); a post-pass over other violations.
+    /// Present for `compose` rules; a post-pass over other violations.
     pub compose: Option<CompiledCompose>,
-    /// Present for `count` rules (§8.10); a post-pass over other violations.
+    /// Present for `count` rules; a post-pass over other violations.
     pub count: Option<CompiledCount>,
     pub unless: Option<CompiledUnless>,
 }
@@ -481,9 +462,7 @@ impl CompiledRule {
     pub fn is_aggregate(&self) -> bool {
         self.compose.is_some() || self.count.is_some()
     }
-}
 
-impl CompiledRule {
     pub fn applies_to_language(&self, language: Language) -> bool {
         match &self.languages {
             None => true,
@@ -501,43 +480,6 @@ impl CompiledRule {
             None => true,
             Some(include) => include.is_match(rel_path),
         }
-    }
-
-    /// Whether any matcher in this rule references events of `kind` (single
-    /// event, sequence steps, or `where_scope` clauses). Used to decide whether
-    /// the generic `Token` stream must be emitted.
-    pub fn references_kind(&self, kind: EventKind) -> bool {
-        if self.sequence.is_none()
-            && self.compose.is_none()
-            && self.count.is_none()
-            && self.event == kind
-        {
-            return true;
-        }
-        if let Some(ws) = &self.where_scope {
-            for m in [&ws.contains, &ws.not_contains, &ws.followed_by]
-                .into_iter()
-                .flatten()
-            {
-                if m.kind == kind {
-                    return true;
-                }
-            }
-        }
-        if let Some(seq) = &self.sequence {
-            if seq.steps.iter().any(|s| matcher_refs_kind(&s.matcher, kind)) {
-                return true;
-            }
-        }
-        false
-    }
-}
-
-fn matcher_refs_kind(m: &StepMatcher, kind: EventKind) -> bool {
-    match m {
-        StepMatcher::Event { kind: Some(k), .. } => *k == kind,
-        StepMatcher::Event { kind: None, .. } => false,
-        StepMatcher::Alt(alts) => alts.iter().any(|a| matcher_refs_kind(a, kind)),
     }
 }
 
@@ -661,20 +603,11 @@ fn compile_preds(
         .collect()
 }
 
-fn parse_event_kind(s: &str, rule_id: &str) -> Result<EventKind, RuleError> {
-    serde_json::from_value(serde_json::Value::String(s.to_string())).map_err(|_| {
-        RuleError::Compile {
-            rule: rule_id.to_string(),
-            msg: format!("unknown event kind `{s}`"),
-        }
-    })
-}
-
 fn step_matcher(raw: &RawStep, rule_id: &str) -> Result<StepMatcher, RuleError> {
     if let Some(alts) = &raw.alt {
         let mut matchers = Vec::new();
         for alt in alts {
-            // Each alternative must be a single step (single-event alternation).
+            // Each alternative must be a single step.
             let [one] = alt.as_slice() else {
                 return Err(RuleError::Compile {
                     rule: rule_id.to_string(),
@@ -685,14 +618,7 @@ fn step_matcher(raw: &RawStep, rule_id: &str) -> Result<StepMatcher, RuleError> 
         }
         return Ok(StepMatcher::Alt(matchers));
     }
-    let kind = match raw.event.as_deref() {
-        None | Some("Any") => None,
-        Some(k) => Some(parse_event_kind(k, rule_id)?),
-    };
-    Ok(StepMatcher::Event {
-        kind,
-        preds: compile_preds(&raw.attrs, rule_id)?,
-    })
+    Ok(StepMatcher::Pat(compile_preds(&raw.attrs, rule_id)?))
 }
 
 fn parse_quant(raw: &RawStep, rule_id: &str) -> Result<Quant, RuleError> {
@@ -755,7 +681,7 @@ fn step_has_captures(step: &CompiledStep) -> bool {
     }
     fn matcher_refs(m: &StepMatcher) -> bool {
         match m {
-            StepMatcher::Event { preds, .. } => preds
+            StepMatcher::Pat(preds) => preds
                 .iter()
                 .any(|p| matches!(p, AttrPred::EqRef { .. } | AttrPred::NeRef { .. })),
             StepMatcher::Alt(alts) => alts.iter().any(matcher_refs),
@@ -786,17 +712,16 @@ fn compile_sequence(raw: &RawSequence, rule_id: &str) -> Result<CompiledSequence
     })
 }
 
-fn compile_event_matcher(m: &RawMatch, rule_id: &str) -> Result<EventMatcher, RuleError> {
-    Ok(EventMatcher {
-        kind: m.event,
+fn compile_clause_matcher(m: &RawMatch, rule_id: &str) -> Result<ClauseMatcher, RuleError> {
+    Ok(ClauseMatcher {
         preds: compile_preds(&m.attrs, rule_id)?,
     })
 }
 
 fn compile_where_scope(ws: &RawWhereScope, rule_id: &str) -> Result<CompiledWhereScope, RuleError> {
-    let conv = |m: &Option<RawMatch>| -> Result<Option<EventMatcher>, RuleError> {
+    let conv = |m: &Option<RawMatch>| -> Result<Option<ClauseMatcher>, RuleError> {
         m.as_ref()
-            .map(|m| compile_event_matcher(m, rule_id))
+            .map(|m| compile_clause_matcher(m, rule_id))
             .transpose()
     };
     Ok(CompiledWhereScope {
@@ -912,13 +837,11 @@ pub fn compile_rule(raw: &RawRule) -> Result<CompiledRule, RuleError> {
         });
     }
 
-    let mut event = EventKind::File; // placeholder for non-`match` bodies
     let mut preds = Vec::new();
     let mut sequence = None;
     let mut compose = None;
     let mut count = None;
     if let Some(m) = &raw.match_ {
-        event = m.event;
         preds = compile_preds(&m.attrs, &raw.id)?;
     } else if let Some(seq) = &raw.match_sequence {
         sequence = Some(compile_sequence(seq, &raw.id)?);
@@ -934,14 +857,14 @@ pub fn compile_rule(raw: &RawRule) -> Result<CompiledRule, RuleError> {
             if raw.match_.is_none() {
                 return Err(RuleError::Compile {
                     rule: raw.id.clone(),
-                    msg: "`where_scope` is only valid on single-event `match` rules".into(),
+                    msg: "`where_scope` is only valid on a single `match` rule".into(),
                 });
             }
             Some(compile_where_scope(ws, &raw.id)?)
         }
     };
 
-    let rule = CompiledRule {
+    Ok(CompiledRule {
         id: raw.id.clone(),
         severity: raw.severity,
         description: raw.description.clone(),
@@ -949,37 +872,18 @@ pub fn compile_rule(raw: &RawRule) -> Result<CompiledRule, RuleError> {
         languages,
         include,
         exclude,
-        event,
         preds,
         sequence,
         where_scope,
         compose,
         count,
         unless,
-    };
-
-    // The compact token stream supports single-event `match Token[...]` only.
-    if rule.references_kind(EventKind::Token)
-        && (rule.sequence.is_some() || rule.where_scope.is_some())
-    {
-        return Err(RuleError::Compile {
-            rule: raw.id.clone(),
-            msg: "Token matching is single-event only (`match Token[...]`); \
-                  sequences and where_scope over tokens are not supported"
-                .into(),
-        });
-    }
-    Ok(rule)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn single_preds(rule: &CompiledRule) -> &[AttrPred] {
-        assert!(rule.sequence.is_none());
-        &rule.preds
-    }
 
     #[test]
     fn compiles_attr_operators() {
@@ -988,56 +892,48 @@ rules:
   - id: T
     severity: error
     match:
-      event: Import
-      attrs:
-        source: "@apollo/client"
-        symbols.any: ["useQuery", "gql"]
-        name.regex: ".*Query$"
-        text.not.regex: "#\\d+"
-        range_lines.gt: 200
+      node_kind: "identifier"
+      text.regex: ".*Query$"
+      curly_depth.gt: 2
 "##;
         let (rules, _) = load(yaml).unwrap();
-        let preds = single_preds(&rules[0]);
-        assert_eq!(preds.len(), 5);
+        let preds = &rules[0].preds;
+        assert!(rules[0].sequence.is_none());
+        assert_eq!(preds.len(), 3);
         let empty = Bindings::new();
-        let anyof = preds
-            .iter()
-            .find(|p| matches!(p, AttrPred::AnyOf { .. }))
-            .unwrap();
-        assert!(anyof.eval(&["gql".into()], &empty));
-        assert!(!anyof.eval(&["useMemo".into()], &empty));
         let cmp = preds.iter().find(|p| matches!(p, AttrPred::Cmp { .. })).unwrap();
-        assert!(cmp.eval(&["250".into()], &empty));
-        assert!(!cmp.eval(&["100".into()], &empty));
+        assert!(cmp.eval(&["3".into()], &empty));
+        assert!(!cmp.eval(&["1".into()], &empty));
+        let re = preds.iter().find(|p| matches!(p, AttrPred::Regex { .. })).unwrap();
+        assert!(re.eval(&["UserQuery".into()], &empty));
+        assert!(!re.eval(&["UserList".into()], &empty));
     }
 
     #[test]
     fn eq_ref_uses_bindings() {
         let p = AttrPred::EqRef {
-            attr: "receiver".into(),
-            var: "obj".into(),
+            attr: "text".into(),
+            var: "n".into(),
         };
         let mut binds = Bindings::new();
-        binds.insert("obj".into(), "mu".into());
-        assert!(p.eval(&["mu".into()], &binds));
-        assert!(!p.eval(&["other".into()], &binds));
-        assert!(!p.eval(&["mu".into()], &Bindings::new())); // unbound -> false
+        binds.insert("n".into(), "foo".into());
+        assert!(p.eval(&["foo".into()], &binds));
+        assert!(!p.eval(&["bar".into()], &binds));
+        assert!(!p.eval(&["foo".into()], &Bindings::new())); // unbound -> false
     }
 
     #[test]
-    fn compiles_sequence_with_capture() {
+    fn compiles_token_sequence_with_capture() {
         let yaml = r##"
 rules:
-  - id: LOCK_WITHOUT_UNLOCK
+  - id: REPEATED_IDENT
     severity: warning
     match_sequence:
       anchor: { within: ScopeStart..ScopeEnd }
       steps:
-        - event: Call
-          attrs: { name.regex: "lock$" }
-          bind: { obj: receiver }
-        - event: Call
-          attrs: { name.regex: "unlock$", receiver.eq_ref: obj }
+        - attrs: { class: "ident" }
+          bind: { n: text }
+        - attrs: { class: "ident", text.eq_ref: n }
           negate: true
           quant: zero_or_more
 "##;
@@ -1045,7 +941,6 @@ rules:
         let seq = rules[0].sequence.as_ref().unwrap();
         assert!(seq.within_scope);
         assert!(seq.has_captures);
-        // two declared steps (matching enumerates start positions, no implicit step)
         assert_eq!(seq.steps.len(), 2);
         assert!(!seq.steps[0].bind.is_empty());
     }
@@ -1056,8 +951,8 @@ rules:
 rules:
   - id: BAD
     severity: error
-    match: { event: Call }
-    match_sequence: { steps: [ { event: Call } ] }
+    match: { node_kind: "x" }
+    match_sequence: { steps: [ { attrs: {} } ] }
 "##;
         assert!(load(yaml).is_err());
     }

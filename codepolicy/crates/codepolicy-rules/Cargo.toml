@@ -6,7 +6,7 @@ license.workspace = true
 description = "Rule schema, YAML loading and compilation for codepolicy"
 
 [dependencies]
-codepolicy-events.workspace = true
+codepolicy-token.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true

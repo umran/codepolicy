@@ -1,155 +1,44 @@
-# codepolicy v0 starter policy pack (proposal §11.3, §12).
-# Rules are matched over the canonical event stream, not raw text.
+# codepolicy starter pack (YAML form).
+# Rules match over the lexer's token stream. See the README for the grammar.
 #
-# Escape hatches (proposal §14):
+# Escape hatches:
 #   waivers_dir: .codepolicy/waivers   (file-scoped, per-rule exceptions)
 #   adr_dir:     docs/adr              (repo-wide decisions, matched by topic)
 
 rules:
-  # --- Frontend GraphQL ----------------------------------------------------
-  - id: NO_DIRECT_GRAPHQL_CLIENT
+  - id: NO_DEBUGGER
     severity: error
-    description: Feature code must use the approved GraphQL access layer.
     applies_to:
       languages: [typescript, javascript]
-      paths:
-        include:
-          - "apps/*/src/**/*.{ts,tsx,js,jsx}"
-          - "packages/**/*.{ts,tsx,js,jsx}"
-        exclude: ["packages/graphql/**"]
     match:
-      event: Import
-      attrs:
-        source: "@apollo/client"
-        symbols.any: ["useQuery", "useMutation", "gql", "ApolloClient"]
-    message: "Use @app/graphql generated hooks instead of importing Apollo directly."
+      node_kind: "debugger"
+    message: "Remove debugger statements before committing."
 
-  - id: NO_RAW_GRAPHQL_FETCH
-    severity: error
-    description: GraphQL calls must go through generated operations and approved hooks.
-    applies_to:
-      languages: [typescript, javascript]
-      paths:
-        include: ["apps/*/src/**/*.{ts,tsx,js,jsx}"]
-    match:
-      event: Call
-      attrs:
-        name: "fetch"
-        string_args.any.regex: ".*graphql.*"
-    message: "Do not call the GraphQL endpoint directly. Use @app/graphql."
-
-  - id: NO_MANUAL_GRAPHQL_OPERATION_TYPES
-    severity: error
-    description: GraphQL operation types must be generated, not hand-written.
-    applies_to:
-      languages: [typescript]
-      paths:
-        include: ["apps/*/src/**/*.{ts,tsx}"]
-        exclude: ["**/generated/**", "**/*.generated.ts"]
-    match:
-      event: TypeDecl
-      attrs:
-        name.regex: ".*(Query|Mutation|Subscription)(Variables)?$"
-    # Heuristic name-suffix check; may match unrelated domain types (§8.3 caveat).
-    message: "Do not hand-write GraphQL operation types. Use generated types."
-
-  # --- Frontend state ------------------------------------------------------
-  - id: NO_UNAPPROVED_STATE_LIBRARY
-    severity: error
-    description: Frontend state management libraries must be explicitly approved.
-    match:
-      event: PackageAdded
-      attrs:
-        name.any:
-          - redux
-          - "@reduxjs/toolkit"
-          - recoil
-          - jotai
-          - mobx
-          - xstate
-    unless:
-      adr.exists:
-        topic: "state management exception"
-    message: "Use Zustand/@app/state unless an ADR justifies another state library."
-
-  - id: NO_DIRECT_ZUSTAND_OUTSIDE_STATE_PACKAGE
+  - id: NO_CONSOLE
     severity: warning
-    description: Feature code should use the project state wrapper, not Zustand directly.
     applies_to:
       languages: [typescript, javascript]
       paths:
-        include: ["apps/*/src/**/*.{ts,tsx,js,jsx}"]
-        exclude: ["packages/state/**"]
+        include: ["apps/**", "packages/**"]
     match:
-      event: Import
-      attrs:
-        source: "zustand"
-    message: "Import state helpers from @app/state instead of importing Zustand directly."
+      node_kind: "identifier"
+      text: "console"
+    message: "Use the logger instead of console.*"
 
-  # --- Cross-language config ----------------------------------------------
-  - id: NO_DIRECT_ENV_ACCESS
-    severity: error
-    description: Environment variables must be read only through the project config layer.
-    applies_to:
-      languages: [typescript, javascript, go, python, rust]
-      paths:
-        include: ["**/*"]
-        exclude:
-          - "**/config/**"
-          - "**/settings/**"
-          - "**/config.ts"
-          - "**/settings.ts"
-    match:
-      event: EnvAccess
-    message: "Read environment variables through the typed config/settings layer."
-
-  # --- Provider SDKs -------------------------------------------------------
-  - id: NO_PROVIDER_SDK_OUTSIDE_INFRA
-    severity: error
-    description: Provider SDKs must be used only inside designated infrastructure packages.
-    applies_to:
-      languages: [typescript, javascript]
-      paths:
-        include: ["**/*.{ts,tsx,js,jsx}"]
-        exclude:
-          - "packages/infra/**"
-          - "**/infrastructure/**"
-    match:
-      event: Import
-      attrs:
-        source.regex: "^(aws-sdk|@aws-sdk/.*|stripe|twilio|googleapis|firebase-admin|@sendgrid/.*)$"
-    message: "Import provider SDKs only from the approved infrastructure packages."
-
-  # --- Hygiene -------------------------------------------------------------
-  - id: NO_TODO_WITHOUT_ISSUE
+  - id: NO_LOOSE_EQUALITY
     severity: warning
-    description: TODO comments must reference a tracking issue.
     applies_to:
       languages: [typescript, javascript]
     match:
-      event: Comment
-      attrs:
-        text.regex: "\\bTODO\\b"
-        text.not.regex: "(#\\d+|[A-Z][A-Z0-9]+-\\d+|https?://)"
+      node_kind: "=="
+    message: "Use === instead of ==."
+
+  - id: TODO_NEEDS_ISSUE
+    severity: warning
+    applies_to:
+      languages: [typescript, javascript]
+    match:
+      class: "comment"
+      text.regex: "\\bTODO\\b"
+      text.not.regex: "(#\\d+|[A-Z][A-Z0-9]+-\\d+|https?://)"
     message: "Add an issue reference to this TODO, e.g. TODO(#123) or TODO(PROJ-45)."
-
-  - id: EVENT_LISTENER_LEAK
-    severity: warning
-    description: An event listener added in a scope should be removed in the same scope.
-    applies_to:
-      languages: [typescript, javascript]
-    match_sequence:
-      anchor: { within: ScopeStart..ScopeEnd }
-      steps:
-        - event: Call
-          attrs:
-            name: "addEventListener"
-          bind: { obj: receiver, ev: arg0 }
-        - event: Call
-          attrs:
-            name: "removeEventListener"
-            receiver.eq_ref: obj
-            arg0.eq_ref: ev
-          negate: true
-          quant: zero_or_more
-    message: "addEventListener has no matching removeEventListener (same object + event) in this scope."

@@ -144,11 +144,11 @@ dependencies = [
  "camino",
  "clap",
  "codepolicy-core",
- "codepolicy-events",
  "codepolicy-frontends",
  "codepolicy-match",
  "codepolicy-report",
  "codepolicy-rules",
+ "codepolicy-token",
  "serde_json",
 ]
 
@@ -158,23 +158,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
- "codepolicy-events",
  "codepolicy-frontends",
  "codepolicy-match",
  "codepolicy-rules",
+ "codepolicy-token",
  "ignore",
  "rayon",
  "serde_json",
  "serde_yaml_ng",
-]
-
-[[package]]
-name = "codepolicy-events"
-version = "0.1.0"
-dependencies = [
- "camino",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -183,7 +174,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
- "codepolicy-events",
+ "codepolicy-token",
  "serde_json",
  "tree-sitter",
  "tree-sitter-javascript",
@@ -195,8 +186,8 @@ name = "codepolicy-match"
 version = "0.1.0"
 dependencies = [
  "camino",
- "codepolicy-events",
  "codepolicy-rules",
+ "codepolicy-token",
  "serde",
  "serde_json",
 ]
@@ -206,9 +197,9 @@ name = "codepolicy-report"
 version = "0.1.0"
 dependencies = [
  "camino",
- "codepolicy-events",
  "codepolicy-match",
  "codepolicy-rules",
+ "codepolicy-token",
  "serde",
  "serde_json",
 ]
@@ -218,13 +209,22 @@ name = "codepolicy-rules"
 version = "0.1.0"
 dependencies = [
  "camino",
- "codepolicy-events",
+ "codepolicy-token",
  "globset",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "thiserror",
+]
+
+[[package]]
+name = "codepolicy-token"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

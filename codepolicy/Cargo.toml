@@ -6,11 +6,11 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Cobra-inspired multi-language policy harness for LLM-assisted software engineering"
+description = "A Cobra-style lexeme policy engine for enforcing custom rules over a codebase"
 
 [workspace.dependencies]
 # Internal crates
-codepolicy-events = { path = "crates/codepolicy-events" }
+codepolicy-token = { path = "crates/codepolicy-token" }
 codepolicy-frontends = { path = "crates/codepolicy-frontends" }
 codepolicy-rules = { path = "crates/codepolicy-rules" }
 codepolicy-match = { path = "crates/codepolicy-match" }

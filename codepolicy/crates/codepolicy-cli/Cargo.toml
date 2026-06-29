@@ -10,7 +10,7 @@ name = "codepolicy"
 path = "src/main.rs"
 
 [dependencies]
-codepolicy-events.workspace = true
+codepolicy-token.workspace = true
 codepolicy-frontends.workspace = true
 codepolicy-rules.workspace = true
 codepolicy-match.workspace = true

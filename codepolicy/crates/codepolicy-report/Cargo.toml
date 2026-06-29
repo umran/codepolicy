@@ -6,7 +6,7 @@ license.workspace = true
 description = "Violation reporting (human, JSON, agent) for codepolicy"
 
 [dependencies]
-codepolicy-events.workspace = true
+codepolicy-token.workspace = true
 codepolicy-match.workspace = true
 codepolicy-rules.workspace = true
 serde.workspace = true

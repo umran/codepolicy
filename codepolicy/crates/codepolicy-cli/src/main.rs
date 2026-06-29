@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand, ValueEnum};
 use codepolicy_core::Project;
-use codepolicy_frontends::{default_frontends, frontend_for, SourceFile};
+use codepolicy_frontends::{frontend_for, frontends, SourceFile};
 use codepolicy_match::summarize;
 use codepolicy_report::{render, Format as ReportFormat};
 use codepolicy_rules::{load, CompiledRule, RuleFile};
@@ -18,7 +18,7 @@ const CONFIG_NAME: &str = "codepolicy.yaml";
 #[command(
     name = "codepolicy",
     version,
-    about = "Cobra-inspired multi-language policy harness for LLM-assisted software engineering"
+    about = "A Cobra-style lexeme policy engine: enforce your own rules over a codebase"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -39,13 +39,10 @@ enum Command {
         #[arg(long, value_enum, default_value = "human")]
         format: OutFormat,
     },
-    /// Print the canonical event stream for a single file (as JSON).
-    Events {
-        /// Source file to extract events from.
+    /// Print the lexeme (token) stream for a single file (as JSON).
+    Tokens {
+        /// Source file to lex.
         file: Utf8PathBuf,
-        /// Also emit the generic, language-local `Token` event for every node.
-        #[arg(long)]
-        tokens: bool,
     },
     /// Explain a rule by id.
     ExplainRule {
@@ -106,7 +103,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
             rules,
             format,
         } => cmd_check(root, rules, format.into()),
-        Command::Events { file, tokens } => cmd_events(file, tokens),
+        Command::Tokens { file } => cmd_tokens(file),
         Command::ExplainRule { id, rules } => cmd_explain(id, rules),
         Command::Init { root, format } => cmd_init(root, format),
     }
@@ -153,9 +150,9 @@ fn cmd_check(root: Utf8PathBuf, rules: Option<Utf8PathBuf>, format: ReportFormat
     Ok(if errors > 0 { 1 } else { 0 })
 }
 
-fn cmd_events(file: Utf8PathBuf, tokens: bool) -> Result<i32> {
-    let frontends = default_frontends();
-    let Some(frontend) = frontend_for(&frontends, &file) else {
+fn cmd_tokens(file: Utf8PathBuf) -> Result<i32> {
+    let fes = frontends();
+    let Some(frontend) = frontend_for(&fes, &file) else {
         bail!("no frontend supports {file}");
     };
     let text = std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?;
@@ -163,16 +160,8 @@ fn cmd_events(file: Utf8PathBuf, tokens: bool) -> Result<i32> {
         path: file.clone(),
         text: &text,
     };
-    let extracted = frontend.extract(&source, tokens)?;
-    let mut all: Vec<serde_json::Value> = extracted
-        .events
-        .iter()
-        .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
-        .collect();
-    if let Some(ts) = &extracted.tokens {
-        all.extend(ts.resolved_json());
-    }
-    println!("{}", serde_json::to_string_pretty(&all)?);
+    let ts = frontend.lex(&source)?;
+    println!("{}", serde_json::to_string_pretty(&ts.resolved_json())?);
     Ok(0)
 }
 
@@ -213,24 +202,25 @@ fn cmd_explain(id: String, rules: Option<Utf8PathBuf>) -> Result<i32> {
             println!("  {}. {step:?}", i + 1);
         }
     } else {
-        println!("\nmatches event: {:?}", rule.event);
-        if !rule.preds.is_empty() {
-            println!("attribute predicates:");
+        println!("\nmatches a token pattern:");
+        if rule.preds.is_empty() {
+            println!("  (any token)");
+        } else {
             for pred in &rule.preds {
                 println!("  - {pred:?}");
             }
         }
     }
     if let Some(ws) = &rule.where_scope {
-        println!("where_scope (enclosing scope):");
-        if ws.contains.is_some() {
-            println!("  - contains: {:?}", ws.contains.as_ref().unwrap().kind);
+        println!("where_scope (enclosing block):");
+        if let Some(c) = &ws.contains {
+            println!("  - contains: {:?}", c.preds);
         }
-        if ws.not_contains.is_some() {
-            println!("  - not_contains: {:?}", ws.not_contains.as_ref().unwrap().kind);
+        if let Some(c) = &ws.not_contains {
+            println!("  - not_contains: {:?}", c.preds);
         }
-        if ws.followed_by.is_some() {
-            println!("  - followed_by: {:?}", ws.followed_by.as_ref().unwrap().kind);
+        if let Some(c) = &ws.followed_by {
+            println!("  - followed_by: {:?}", c.preds);
         }
     }
     if let Some(unless) = &rule.unless {

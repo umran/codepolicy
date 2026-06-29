@@ -1,6 +1,0 @@
-id: ADR-0042
-topic: "state management exception"
-status: accepted
-decision: Allow jotai in this app; it models the derived-atom graph the Zustand wrapper cannot express.
-date: 2026-04-01
-approved_by: architecture-group
